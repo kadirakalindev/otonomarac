@@ -31,6 +31,7 @@ class OtonomArac:
                  camera_resolution=(640, 480),
                  framerate=30,
                  debug=False,
+                 debug_fps=10,
                  left_motor_pins=(17, 18),
                  right_motor_pins=(22, 23),
                  left_pwm_pin=None,
@@ -42,12 +43,14 @@ class OtonomArac:
             camera_resolution (tuple): Kamera çözünürlüğü (genişlik, yükseklik)
             framerate (int): Kare hızı (fps)
             debug (bool): Hata ayıklama modu
+            debug_fps (int): Debug modunda gösterilecek maksimum fps
             left_motor_pins (tuple): Sol motor pinleri (ileri, geri)
             right_motor_pins (tuple): Sağ motor pinleri (ileri, geri)
             left_pwm_pin (int): Sol motor PWM pini
             right_pwm_pin (int): Sağ motor PWM pini
         """
         self.debug = debug
+        self.debug_fps = debug_fps
         self.running = False
         
         # Kamera başlatma
@@ -79,6 +82,11 @@ class OtonomArac:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
+        # FPS ölçümü için değişkenler
+        self.fps = 0
+        self.frame_count = 0
+        self.fps_start_time = 0
+        
         logger.info("Otonom araç başlatıldı.")
     
     def signal_handler(self, sig, frame):
@@ -107,6 +115,19 @@ class OtonomArac:
             # Çalışma başlangıcında biraz beklet
             time.sleep(2)
             
+            # FPS hesaplama değişkenlerini başlat
+            self.fps_start_time = time.time()
+            self.frame_count = 0
+            
+            # Debug modu için pencere oluştur
+            if self.debug:
+                cv2.namedWindow("Otonom Arac", cv2.WINDOW_NORMAL)
+                cv2.setWindowTitle("Otonom Arac", "Otonom Arac - Serit Tespiti")
+            
+            # Debug modunda son frame update zamanı
+            last_debug_update = 0
+            debug_frame_interval = 1.0 / self.debug_fps if self.debug_fps > 0 else 0
+            
             # Ana döngü
             while self.running:
                 # Kameradan görüntü al
@@ -118,11 +139,30 @@ class OtonomArac:
                 # Şeritlere göre motoru kontrol et
                 self.motor_controller.follow_lane(center_diff)
                 
-                # Debug modunda görüntüyü göster
+                # FPS hesapla
+                self.frame_count += 1
+                elapsed_time = time.time() - self.fps_start_time
+                if elapsed_time >= 1.0:
+                    self.fps = self.frame_count / elapsed_time
+                    self.fps_start_time = time.time()
+                    self.frame_count = 0
+                    logger.debug(f"FPS: {self.fps:.1f}")
+                
+                # Debug modunda görüntüyü göster (fps sınırlandırması ile)
                 if self.debug:
-                    cv2.imshow("Otonom Araç", processed_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+                    current_time = time.time()
+                    if current_time - last_debug_update >= debug_frame_interval:
+                        # FPS bilgisini görüntüye ekle
+                        cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", 
+                                  (processed_frame.shape[1] - 120, 30), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                        
+                        # Görüntüyü göster
+                        cv2.imshow("Otonom Arac", processed_frame)
+                        last_debug_update = current_time
+                        
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
                 
         except Exception as e:
             logger.error(f"Hata oluştu: {e}")
@@ -163,6 +203,7 @@ def parse_arguments():
     """
     parser = argparse.ArgumentParser(description='Otonom Araç Kontrol Programı')
     parser.add_argument('--debug', action='store_true', help='Hata ayıklama modunu etkinleştirir')
+    parser.add_argument('--debug-fps', type=int, default=10, help='Debug modunda gösterilecek maksimum FPS')
     parser.add_argument('--resolution', default='640x480', help='Kamera çözünürlüğü (GENxYÜK)')
     parser.add_argument('--fps', type=int, default=30, help='Kare hızı')
     
@@ -194,6 +235,7 @@ def main():
         camera_resolution=resolution,
         framerate=args.fps,
         debug=args.debug,
+        debug_fps=args.debug_fps,
         left_motor_pins=tuple(args.left_motor),
         right_motor_pins=tuple(args.right_motor),
         left_pwm_pin=args.left_pwm,

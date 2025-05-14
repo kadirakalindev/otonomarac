@@ -71,6 +71,9 @@ class LaneDetector:
         self.last_right_lane = None
         self.smoothing_factor = 0.8  # Yeni ve eski şerit değerlerini birleştirme faktörü
         
+        # Debug görüntüleri
+        self.debug_images = {}
+        
         logger.info("Şerit tespit modülü başlatıldı.")
     
     def preprocess_image(self, image):
@@ -103,9 +106,10 @@ class LaneDetector:
         cv2.fillPoly(roi_mask, [roi_vertices], 255)
         masked_edges = cv2.bitwise_and(edges, roi_mask)
         
+        # Debug görüntülerini kaydet
         if self.debug:
-            cv2.imshow("Edges", edges)
-            cv2.imshow("Masked Edges", masked_edges)
+            self.debug_images["edges"] = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            self.debug_images["masked_edges"] = cv2.cvtColor(masked_edges, cv2.COLOR_GRAY2BGR)
         
         return masked_edges
     
@@ -138,8 +142,9 @@ class LaneDetector:
         # Kuş bakışı dönüşümü
         bird_eye_view = self.warp_perspective(processed)
         
+        # Debug görüntülerini kaydet
         if self.debug:
-            cv2.imshow("Bird's Eye View", bird_eye_view)
+            self.debug_images["bird_eye_view"] = cv2.cvtColor(bird_eye_view, cv2.COLOR_GRAY2BGR)
         
         # Hough dönüşümü ile çizgi tespiti
         lines = cv2.HoughLinesP(
@@ -343,6 +348,56 @@ class LaneDetector:
         
         return center_diff
     
+    def create_debug_view(self, original_frame, processed_frame, center_diff):
+        """
+        Debug görünümü oluşturur. Tüm debug görüntülerini tek bir pencerede birleştirir.
+        
+        Args:
+            original_frame (numpy.ndarray): Orijinal kare
+            processed_frame (numpy.ndarray): İşlenmiş kare (şeritler çizilmiş)
+            center_diff (int): Merkez pozisyon farkı
+            
+        Returns:
+            numpy.ndarray: Birleştirilmiş debug görünümü
+        """
+        # Görüntüleri yeniden boyutlandır
+        debug_size = (320, 240)  # Küçük görüntüler için boyut
+        
+        # Birleştirilmiş görüntü için zemin oluştur (2x2 grid)
+        h, w = debug_size
+        debug_view = np.zeros((h*2, w*2, 3), dtype=np.uint8)
+        
+        # Orijinal görüntüyü sol üst köşeye yerleştir
+        resized_original = cv2.resize(original_frame, debug_size)
+        debug_view[0:h, 0:w] = resized_original
+        
+        # İşlenmiş görüntüyü (şeritler çizilmiş) sağ üst köşeye yerleştir
+        resized_processed = cv2.resize(processed_frame, debug_size)
+        debug_view[0:h, w:w*2] = resized_processed
+        
+        # Debug görüntülerini alt kısma yerleştir
+        if "edges" in self.debug_images:
+            resized_edges = cv2.resize(self.debug_images["edges"], debug_size)
+            debug_view[h:h*2, 0:w] = resized_edges
+            
+        if "bird_eye_view" in self.debug_images:
+            resized_bird = cv2.resize(self.debug_images["bird_eye_view"], debug_size)
+            debug_view[h:h*2, w:w*2] = resized_bird
+        
+        # Üst kısma bilgi metni ekle
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        if center_diff is not None:
+            cv2.putText(debug_view, f"Merkez Farki: {center_diff}px", 
+                      (10, 30), font, 0.7, (0, 0, 255), 2)
+            
+        # Başlıklar ekle
+        cv2.putText(debug_view, "Orijinal", (10, 15), font, 0.5, (255, 255, 255), 1)
+        cv2.putText(debug_view, "Serit Tespiti", (w+10, 15), font, 0.5, (255, 255, 255), 1)
+        cv2.putText(debug_view, "Kenarlar", (10, h+15), font, 0.5, (255, 255, 255), 1)
+        cv2.putText(debug_view, "Kus Bakisi", (w+10, h+15), font, 0.5, (255, 255, 255), 1)
+        
+        return debug_view
+    
     def process_frame(self, frame):
         """
         Bir görüntü karesini işler ve sonuçları döndürür.
@@ -353,6 +408,9 @@ class LaneDetector:
         Returns:
             tuple: (İşlenmiş görüntü, merkez pozisyon farkı)
         """
+        # Debug görüntülerini temizle
+        self.debug_images = {}
+        
         # Görüntüyü yeniden boyutlandır
         if frame.shape[1] != self.width or frame.shape[0] != self.height:
             frame = cv2.resize(frame, (self.width, self.height))
@@ -367,17 +425,24 @@ class LaneDetector:
         center_diff = self.calculate_lane_center(left_lane, right_lane)
         
         # Debug modunda merkez çiz
-        if self.debug and center_diff is not None:
-            # Merkezleri çiz
-            image_center = self.width // 2
-            cv2.circle(result, (image_center, self.height - 30), 5, (255, 0, 0), -1)
-            lane_center = image_center + center_diff
-            cv2.circle(result, (lane_center, self.height - 30), 5, (0, 0, 255), -1)
-            cv2.line(result, (image_center, self.height - 30), 
-                   (lane_center, self.height - 30), (0, 255, 255), 2)
+        if self.debug:
+            # Ana görüntüde merkezleri çiz
+            if center_diff is not None:
+                image_center = self.width // 2
+                lane_center = image_center + center_diff
+                cv2.circle(result, (image_center, self.height - 30), 5, (255, 0, 0), -1)
+                cv2.circle(result, (lane_center, self.height - 30), 5, (0, 0, 255), -1)
+                cv2.line(result, (image_center, self.height - 30), 
+                       (lane_center, self.height - 30), (0, 255, 255), 2)
+                
+                # Merkez farkını yaz
+                cv2.putText(result, f"Merkez Farki: {center_diff}", 
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+            # Birleştirilmiş debug görünümü oluştur
+            debug_view = self.create_debug_view(frame, result, center_diff)
             
-            # Merkez farkını yaz
-            cv2.putText(result, f"Merkez Farkı: {center_diff}", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            # Debug görünümünü göster (ana görüntü yerine)
+            result = debug_view
         
         return result, center_diff 
