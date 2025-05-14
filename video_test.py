@@ -84,6 +84,11 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
         processed_frame, center_diff = lane_detector.process_frame(frame)
         process_time = (time.time() - process_start) * 1000  # milisaniye
         
+        # Boyut kontrolü - işlenmiş frame ile orijinal frame'in boyutları farklı olabilir
+        if processed_frame.shape[0] != resolution[1] or processed_frame.shape[1] != resolution[0]:
+            logger.info(f"İşlenmiş görüntü boyutu ({processed_frame.shape[1]}x{processed_frame.shape[0]}) orijinalden ({resolution[0]}x{resolution[1]}) farklı. Yeniden boyutlandırılıyor.")
+            processed_frame = cv2.resize(processed_frame, resolution)
+        
         # İşlem bilgilerini ekle
         frame_info = f"Kare: {frame_count}/{total_frames} | İşlem: {process_time:.1f}ms"
         center_info = f"Merkez Farkı: {center_diff if center_diff is not None else 'Yok'}"
