@@ -3,13 +3,13 @@
 
 """
 Otonom Araç - Motor Kontrol Modülü
-Bu modül, araç motorlarının kontrolünü gpiozero kütüphanesini kullanarak sağlar.
+Bu modül, araç motorlarının kontrolünü RPi.GPIO kütüphanesini kullanarak sağlar.
 PID kontrol ile şerit takibi için gerekli motor hız ayarlarını yapar.
 """
 
 import time
 import logging
-from gpiozero import DigitalOutputDevice, PWMOutputDevice
+import RPi.GPIO as GPIO
 import numpy as np
 
 # Log yapılandırması
@@ -30,7 +30,8 @@ class MotorController:
                  right_pwm_pin=32,            # Sağ motor için PWM enable pini
                  max_speed=1.0,               # Maksimum hız değeri (0-1 arası)
                  default_speed=0.5,           # Varsayılan hız
-                 use_board_pins=True):        # BOARD pin numaralandırmasını kullan
+                 use_board_pins=True,         # BOARD pin numaralandırmasını kullan
+                 pwm_frequency=100):          # PWM frekansı (Hz)
         """
         MotorController sınıfını başlatır.
         
@@ -41,51 +42,31 @@ class MotorController:
             right_pwm_pin (int): Sağ motor için PWM pini (Enable)
             max_speed (float): Maksimum hız seviyesi (0-1 arası)
             default_speed (float): Varsayılan hız seviyesi (0-1 arası)
-            use_board_pins (bool): BOARD pin numaralandırmasını kullan (True) veya BCM kullan (False)
+            use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
+            pwm_frequency (int): PWM frekansı (Hz)
         """
-        # BOARD kullanıldığında pin numaralarını BCM'ye dönüştür
         self.use_board_pins = use_board_pins
+        self.max_speed = max_speed
+        self.default_speed = default_speed
+        self.pwm_frequency = pwm_frequency
         
-        # BOARD pin numaralarını gpiozero için BCM'ye dönüştür
+        # Pin numaralandırma modunu ayarla
         if use_board_pins:
-            # BOARD to BCM numaralandırma dönüşümü için yaygın pinler
-            board_to_bcm = {
-                3: 2, 5: 3, 7: 4, 8: 14, 10: 15, 11: 17, 12: 18, 13: 27,
-                15: 22, 16: 23, 18: 24, 19: 10, 21: 9, 22: 25, 23: 11,
-                24: 8, 26: 7, 29: 5, 31: 6, 32: 12, 33: 13, 35: 19, 36: 16,
-                37: 26, 38: 20, 40: 21
-            }
+            GPIO.setmode(GPIO.BOARD)
+            logger.info("BOARD pin numaralandırması kullanılıyor.")
             
-            # Pin numaralarını BCM'ye dönüştür
-            left_in1_bcm = board_to_bcm.get(left_motor_pins[0])
-            left_in2_bcm = board_to_bcm.get(left_motor_pins[1])
-            right_in1_bcm = board_to_bcm.get(right_motor_pins[0])
-            right_in2_bcm = board_to_bcm.get(right_motor_pins[1])
-            left_en_bcm = board_to_bcm.get(left_pwm_pin)
-            right_en_bcm = board_to_bcm.get(right_pwm_pin)
-            
-            # Dönüştürme başarısız olursa uyarı ver
-            missing_pins = []
-            if left_in1_bcm is None: missing_pins.append(f"Sol IN1 ({left_motor_pins[0]})")
-            if left_in2_bcm is None: missing_pins.append(f"Sol IN2 ({left_motor_pins[1]})")
-            if right_in1_bcm is None: missing_pins.append(f"Sağ IN1 ({right_motor_pins[0]})")
-            if right_in2_bcm is None: missing_pins.append(f"Sağ IN2 ({right_motor_pins[1]})")
-            if left_en_bcm is None: missing_pins.append(f"Sol Enable ({left_pwm_pin})")
-            if right_en_bcm is None: missing_pins.append(f"Sağ Enable ({right_pwm_pin})")
-            
-            if missing_pins:
-                logger.warning(f"Şu pinler BOARD-BCM dönüşümünde bulunamadı: {', '.join(missing_pins)}")
-                logger.warning("Doğru pin numaralarını kullandığınızdan emin olun veya BCM numaralandırması kullanın.")
-            
-            # BCM numaralarını kullan
-            self.left_in1_pin = left_in1_bcm if left_in1_bcm is not None else left_motor_pins[0]
-            self.left_in2_pin = left_in2_bcm if left_in2_bcm is not None else left_motor_pins[1]
-            self.right_in1_pin = right_in1_bcm if right_in1_bcm is not None else right_motor_pins[0]
-            self.right_in2_pin = right_in2_bcm if right_in2_bcm is not None else right_motor_pins[1]
-            self.left_en_pin = left_en_bcm if left_en_bcm is not None else left_pwm_pin
-            self.right_en_pin = right_en_bcm if right_en_bcm is not None else right_pwm_pin
+            # Pin numaralarını doğrudan kullan
+            self.left_in1_pin = left_motor_pins[0]
+            self.left_in2_pin = left_motor_pins[1]
+            self.right_in1_pin = right_motor_pins[0]
+            self.right_in2_pin = right_motor_pins[1]
+            self.left_en_pin = left_pwm_pin
+            self.right_en_pin = right_pwm_pin
         else:
-            # BCM numaralarını doğrudan kullan
+            GPIO.setmode(GPIO.BCM)
+            logger.info("BCM pin numaralandırması kullanılıyor.")
+            
+            # Pin numaralarını doğrudan kullan
             self.left_in1_pin = left_motor_pins[0]
             self.left_in2_pin = left_motor_pins[1]
             self.right_in1_pin = right_motor_pins[0]
@@ -94,32 +75,40 @@ class MotorController:
             self.right_en_pin = right_pwm_pin
         
         # Kullanılan pin numaralarını logla
-        logger.info(f"Sol motor pinleri (BCM): IN1={self.left_in1_pin}, IN2={self.left_in2_pin}, EN={self.left_en_pin}")
-        logger.info(f"Sağ motor pinleri (BCM): IN1={self.right_in1_pin}, IN2={self.right_in2_pin}, EN={self.right_en_pin}")
-            
-        self.max_speed = max_speed
-        self.default_speed = default_speed
+        logger.info(f"Sol motor pinleri: IN1={self.left_in1_pin}, IN2={self.left_in2_pin}, EN={self.left_en_pin}")
+        logger.info(f"Sağ motor pinleri: IN1={self.right_in1_pin}, IN2={self.right_in2_pin}, EN={self.right_en_pin}")
         
         try:
-            # Pin kontrolü için nesneleri oluştur
-            logger.info("Motor kontrol çıkışları başlatılıyor...")
+            # Daha önce kullanılmış olabilecek pin yapılandırmalarını temizle
+            GPIO.cleanup()
             
-            # PWM çıkışları (L298N Enable pinleri)
-            self.left_pwm = PWMOutputDevice(self.left_en_pin)
-            self.right_pwm = PWMOutputDevice(self.right_en_pin)
+            # Pin'leri başlat
+            logger.info("GPIO pinleri başlatılıyor...")
             
-            # Motor yön kontrol pinleri
-            self.left_in1 = DigitalOutputDevice(self.left_in1_pin, initial_value=False)
-            self.left_in2 = DigitalOutputDevice(self.left_in2_pin, initial_value=False)
-            self.right_in1 = DigitalOutputDevice(self.right_in1_pin, initial_value=False)
-            self.right_in2 = DigitalOutputDevice(self.right_in2_pin, initial_value=False)
+            # Motor kontrol pinleri
+            GPIO.setup(self.left_in1_pin, GPIO.OUT)
+            GPIO.setup(self.left_in2_pin, GPIO.OUT)
+            GPIO.setup(self.right_in1_pin, GPIO.OUT)
+            GPIO.setup(self.right_in2_pin, GPIO.OUT)
+            GPIO.setup(self.left_en_pin, GPIO.OUT)
+            GPIO.setup(self.right_en_pin, GPIO.OUT)
             
-            # İlk başlangıçta motorları durdur
-            self.stop()
+            # PWM nesnelerini oluştur
+            self.left_pwm = GPIO.PWM(self.left_en_pin, self.pwm_frequency)
+            self.right_pwm = GPIO.PWM(self.right_en_pin, self.pwm_frequency)
+            
+            # PWM'yi başlat (durgun durumda)
+            self.left_pwm.start(0)
+            self.right_pwm.start(0)
+            
+            # Başlangıçta motorları durdur
+            self._set_left_motor('stop', 0)
+            self._set_right_motor('stop', 0)
+            
+            logger.info("Motor pinleri başarıyla başlatıldı.")
             
         except Exception as e:
             logger.error(f"Motor kontrol başlatma hatası: {e}")
-            # Hata durumunda temizleme yap
             self.cleanup()
             raise
         
@@ -146,22 +135,22 @@ class MotorController:
             direction (str): 'forward', 'backward' veya 'stop'
             speed (float): Hız değeri (0-1 arası)
         """
-        # Hız değerini sınırla
-        speed = min(max(0, speed), self.max_speed)
+        # Hız değerini sınırla ve PWM değerine (0-100) dönüştür
+        duty_cycle = min(max(0, speed), self.max_speed) * 100
         
         # Yöne göre pinleri ayarla
         if direction == 'forward':
-            self.left_in1.on()
-            self.left_in2.off()
-            self.left_pwm.value = speed
+            GPIO.output(self.left_in1_pin, GPIO.HIGH)
+            GPIO.output(self.left_in2_pin, GPIO.LOW)
+            self.left_pwm.ChangeDutyCycle(duty_cycle)
         elif direction == 'backward':
-            self.left_in1.off()
-            self.left_in2.on()
-            self.left_pwm.value = speed
+            GPIO.output(self.left_in1_pin, GPIO.LOW)
+            GPIO.output(self.left_in2_pin, GPIO.HIGH)
+            self.left_pwm.ChangeDutyCycle(duty_cycle)
         else:  # stop
-            self.left_in1.off()
-            self.left_in2.off()
-            self.left_pwm.value = 0
+            GPIO.output(self.left_in1_pin, GPIO.LOW)
+            GPIO.output(self.left_in2_pin, GPIO.LOW)
+            self.left_pwm.ChangeDutyCycle(0)
     
     def _set_right_motor(self, direction, speed):
         """
@@ -171,22 +160,22 @@ class MotorController:
             direction (str): 'forward', 'backward' veya 'stop'
             speed (float): Hız değeri (0-1 arası)
         """
-        # Hız değerini sınırla
-        speed = min(max(0, speed), self.max_speed)
+        # Hız değerini sınırla ve PWM değerine (0-100) dönüştür
+        duty_cycle = min(max(0, speed), self.max_speed) * 100
         
         # Yöne göre pinleri ayarla
         if direction == 'forward':
-            self.right_in1.on()
-            self.right_in2.off()
-            self.right_pwm.value = speed
+            GPIO.output(self.right_in1_pin, GPIO.HIGH)
+            GPIO.output(self.right_in2_pin, GPIO.LOW)
+            self.right_pwm.ChangeDutyCycle(duty_cycle)
         elif direction == 'backward':
-            self.right_in1.off()
-            self.right_in2.on()
-            self.right_pwm.value = speed
+            GPIO.output(self.right_in1_pin, GPIO.LOW)
+            GPIO.output(self.right_in2_pin, GPIO.HIGH)
+            self.right_pwm.ChangeDutyCycle(duty_cycle)
         else:  # stop
-            self.right_in1.off()
-            self.right_in2.off()
-            self.right_pwm.value = 0
+            GPIO.output(self.right_in1_pin, GPIO.LOW)
+            GPIO.output(self.right_in2_pin, GPIO.LOW)
+            self.right_pwm.ChangeDutyCycle(0)
     
     def forward(self, speed=None):
         """
@@ -341,33 +330,21 @@ class MotorController:
     
     def cleanup(self):
         """
-        Motorları durdurur ve kapatır.
+        Motorları durdurur ve GPIO pinlerini temizler.
         """
         logger.info("Motor kontrol modülü kapatılıyor...")
         try:
             # Motorları durdur
-            if hasattr(self, 'left_in1') and hasattr(self, 'left_in2'):
-                self.left_in1.off()
-                self.left_in2.off()
+            self.stop()
             
-            if hasattr(self, 'right_in1') and hasattr(self, 'right_in2'):
-                self.right_in1.off()
-                self.right_in2.off()
-                
-            # PWM değerlerini sıfırla
+            # PWM'yi durdur
             if hasattr(self, 'left_pwm'):
-                self.left_pwm.value = 0
+                self.left_pwm.stop()
             if hasattr(self, 'right_pwm'):
-                self.right_pwm.value = 0
-                
-            # Pin kaynaklarını temizle
-            for attr in ['left_in1', 'left_in2', 'right_in1', 'right_in2', 'left_pwm', 'right_pwm']:
-                if hasattr(self, attr):
-                    device = getattr(self, attr)
-                    try:
-                        device.close()
-                    except Exception as e:
-                        logger.warning(f"{attr} kapatma hatası: {e}")
+                self.right_pwm.stop()
+            
+            # GPIO pinlerini temizle
+            GPIO.cleanup()
                         
             logger.info("Motor kontrol modülü kapatıldı.")
         except Exception as e:

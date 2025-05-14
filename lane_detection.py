@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import time
 import logging
+import os
 
 # Log yapılandırması
 logging.basicConfig(
@@ -66,10 +67,21 @@ class LaneDetector:
         self.min_line_length = 20
         self.max_line_gap = 300
         
+        # Renk filtresi parametreleri (Beyaz ve sarı şeritler için)
+        # HSV renk aralıkları
+        self.yellow_lower = np.array([15, 80, 120])
+        self.yellow_upper = np.array([35, 255, 255])
+        self.white_lower = np.array([0, 0, 200])
+        self.white_upper = np.array([180, 30, 255])
+        
         # Son şerit çizgileri (hafıza)
         self.last_left_lane = None
         self.last_right_lane = None
         self.smoothing_factor = 0.8  # Yeni ve eski şerit değerlerini birleştirme faktörü
+        
+        # Şerit kaybı durumunu takip etme
+        self.lost_lane_counter = 0
+        self.max_lost_lane_frames = 10  # Bu kadar kare boyunca şerit bulunamazsa sıfırla
         
         # Debug görüntüleri
         self.debug_images = {}
@@ -78,7 +90,82 @@ class LaneDetector:
         self.LANE_COLOR = (0, 255, 0)  # Parlak yeşil
         self.LANE_THICKNESS = 8  # Daha kalın çizgi
         
+        # Kalibrasyon dosyasını yükle (varsa)
+        self.load_calibration()
+        
         logger.info("Şerit tespit modülü başlatıldı.")
+    
+    def load_calibration(self, filename="calibration.json"):
+        """
+        Kalibrasyon dosyasını yükler (varsa)
+        """
+        import json
+        
+        if os.path.exists(filename):
+            try:
+                with open(filename, 'r') as f:
+                    calibration = json.load(f)
+                
+                # Perspektif dönüşüm noktalarını güncelle
+                if 'src_points' in calibration and 'dst_points' in calibration:
+                    self.src_points = np.float32(calibration['src_points'])
+                    self.dst_points = np.float32(calibration['dst_points'])
+                    self.perspective_M = cv2.getPerspectiveTransform(self.src_points, self.dst_points)
+                    self.inverse_perspective_M = cv2.getPerspectiveTransform(self.dst_points, self.src_points)
+                    logger.info("Kalibrasyon dosyası yüklendi.")
+                
+                # Kenar tespiti parametrelerini güncelle
+                if 'canny_low_threshold' in calibration and 'canny_high_threshold' in calibration:
+                    self.canny_low_threshold = calibration['canny_low_threshold']
+                    self.canny_high_threshold = calibration['canny_high_threshold']
+                
+                # Hough parametrelerini güncelle
+                if 'hough_threshold' in calibration:
+                    self.hough_threshold = calibration['hough_threshold']
+                if 'min_line_length' in calibration:
+                    self.min_line_length = calibration['min_line_length']
+                if 'max_line_gap' in calibration:
+                    self.max_line_gap = calibration['max_line_gap']
+                
+                logger.info("Kalibrasyon parametreleri yüklendi.")
+                
+            except Exception as e:
+                logger.warning(f"Kalibrasyon dosyası yüklenemedi: {e}")
+    
+    def apply_color_filter(self, image):
+        """
+        Görüntüye renk filtresi uygular, beyaz ve sarı şeritleri belirginleştirir.
+        
+        Args:
+            image (numpy.ndarray): İşlenecek renkli görüntü
+            
+        Returns:
+            numpy.ndarray: Renk filtrelenmiş binary görüntü
+        """
+        # BGR'dan HSV'ye dönüştür
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Beyaz ve sarı renk maskeleri oluştur
+        white_mask = cv2.inRange(hsv, self.white_lower, self.white_upper)
+        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
+        
+        # Maskeleri birleştir
+        combined_mask = cv2.bitwise_or(white_mask, yellow_mask)
+        
+        # Morfolojik işlemler (gürültü azaltma ve şerit kalınlaştırma)
+        kernel = np.ones((5, 5), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Debug için maskeleri kaydet
+        if self.debug:
+            white_mask_colored = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
+            yellow_mask_colored = cv2.cvtColor(yellow_mask, cv2.COLOR_GRAY2BGR)
+            self.debug_images["white_mask"] = white_mask_colored
+            self.debug_images["yellow_mask"] = yellow_mask_colored
+            self.debug_images["color_filter"] = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
+        
+        return combined_mask
     
     def preprocess_image(self, image):
         """
@@ -90,7 +177,10 @@ class LaneDetector:
         Returns:
             numpy.ndarray: İşlenmiş görüntü
         """
-        # Gri tonlamaya dönüştürme
+        # Renk filtresi uygula (beyaz ve sarı şeritleri belirginleştir)
+        color_filtered = self.apply_color_filter(image)
+        
+        # Gri tonlamaya dönüştürme (eğer renk filtresi kullanılmazsa)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
         # Gürültü giderme (Gaussian Blur)
@@ -99,8 +189,16 @@ class LaneDetector:
         # Kenar tespiti (Canny)
         edges = cv2.Canny(blurred, self.canny_low_threshold, self.canny_high_threshold)
         
+        # Adaptif eşikleme (değişken ışık koşulları için)
+        _, binary_adaptive = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        
+        # Renk filtresi ve kenar tespitini birleştir
+        combined = cv2.bitwise_or(color_filtered, edges)
+        
         # İlgi bölgesi belirleme (ROI)
-        roi_mask = np.zeros_like(edges)
+        roi_mask = np.zeros_like(combined)
         roi_vertices = np.array([
             [0, self.height],
             [self.width * 0.4, self.height * 0.6],
@@ -108,12 +206,15 @@ class LaneDetector:
             [self.width, self.height]
         ], dtype=np.int32)
         cv2.fillPoly(roi_mask, [roi_vertices], 255)
-        masked_edges = cv2.bitwise_and(edges, roi_mask)
+        masked_edges = cv2.bitwise_and(combined, roi_mask)
         
         # Debug görüntülerini kaydet
         if self.debug:
+            self.debug_images["gray"] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
             self.debug_images["edges"] = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            self.debug_images["binary_adaptive"] = cv2.cvtColor(binary_adaptive, cv2.COLOR_GRAY2BGR)
             self.debug_images["masked_edges"] = cv2.cvtColor(masked_edges, cv2.COLOR_GRAY2BGR)
+            self.debug_images["combined"] = cv2.cvtColor(combined, cv2.COLOR_GRAY2BGR)
         
         return masked_edges
     
@@ -188,6 +289,19 @@ class LaneDetector:
         # Şeritleri ortalama hesaplayarak bul
         left_lane = self._find_average_line(left_lines)
         right_lane = self._find_average_line(right_lines)
+        
+        # Şerit kaybı durumunu takip et
+        if left_lane is None and right_lane is None:
+            self.lost_lane_counter += 1
+        else:
+            self.lost_lane_counter = 0
+            
+        # Belirli bir süre şerit bulunamazsa durumu sıfırla
+        if self.lost_lane_counter > self.max_lost_lane_frames:
+            self.last_left_lane = None
+            self.last_right_lane = None
+            logger.warning("Şerit bulunamadı, hafıza sıfırlandı!")
+            self.lost_lane_counter = 0
         
         # Şerit devamsızlığına karşı düzeltme (önceki karelerden bilgi kullan)
         left_lane = self._smooth_lane(left_lane, self.last_left_lane)
@@ -311,35 +425,83 @@ class LaneDetector:
                 x1, y1, x2, y2 = line
                 cv2.line(lane_image, (x1, y1), (x2, y2), (0, 0, 255), 1)  # Kırmızı renk
         
+        # Şerit kaybı durumunda uyarı mesajı
+        if left_lane is None and right_lane is None:
+            if self.debug:
+                cv2.putText(image, "UYARI: Serit bulunamadi!", 
+                          (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            return image
+        
         # Şerit çizimi (kuş bakışı görünümünde)
         if left_lane is not None:
             m_left, b_left = left_lane
             y1 = self.height
             y2 = int(self.height * 0.6)
-            x1_left = int((y1 - b_left) / m_left)
-            x2_left = int((y2 - b_left) / m_left)
             
-            cv2.line(lane_image, (x1_left, y1), (x2_left, y2), color, thickness)
+            # Değerler sınırların içinde mi kontrol et
+            try:
+                x1_left = int((y1 - b_left) / m_left)
+                x2_left = int((y2 - b_left) / m_left)
+                
+                # Şerit çizgisini çiz
+                cv2.line(lane_image, (x1_left, y1), (x2_left, y2), color, thickness)
+                
+                # Pulsating effect (debug modunda)
+                if self.debug:
+                    pulse_color = (0, 255, 255)  # Sarı
+                    pulse_width = int(thickness / 2)
+                    
+                    # Daha görünür bir efekt için ana şeritin üzerine ince bir çizgi
+                    cv2.line(lane_image, (x1_left, y1), (x2_left, y2), pulse_color, pulse_width)
+            except:
+                logger.warning("Sol şerit çizimi hatası. Değerler geçersiz.")
         
         if right_lane is not None:
             m_right, b_right = right_lane
             y1 = self.height
             y2 = int(self.height * 0.6)
-            x1_right = int((y1 - b_right) / m_right)
-            x2_right = int((y2 - b_right) / m_right)
             
-            cv2.line(lane_image, (x1_right, y1), (x2_right, y2), color, thickness)
+            try:
+                x1_right = int((y1 - b_right) / m_right)
+                x2_right = int((y2 - b_right) / m_right)
+                
+                # Şerit çizgisini çiz
+                cv2.line(lane_image, (x1_right, y1), (x2_right, y2), color, thickness)
+                
+                # Pulsating effect (debug modunda)
+                if self.debug:
+                    pulse_color = (0, 255, 255)  # Sarı
+                    pulse_width = int(thickness / 2)
+                    
+                    # Daha görünür bir efekt için ana şeritin üzerine ince bir çizgi
+                    cv2.line(lane_image, (x1_right, y1), (x2_right, y2), pulse_color, pulse_width)
+            except:
+                logger.warning("Sağ şerit çizimi hatası. Değerler geçersiz.")
         
-        # Şeritler arasını doldur
+        # Şeritler arasını doldur (eğer her iki şerit de mevcutsa)
         if left_lane is not None and right_lane is not None:
-            pts = np.array([
-                [x1_left, y1],
-                [x2_left, y2],
-                [x2_right, y2],
-                [x1_right, y1]
-            ], dtype=np.int32)
-            
-            cv2.fillPoly(lane_image, [pts], (0, 100, 0))
+            try:
+                m_left, b_left = left_lane
+                m_right, b_right = right_lane
+                
+                y1 = self.height
+                y2 = int(self.height * 0.6)
+                
+                x1_left = int((y1 - b_left) / m_left)
+                x2_left = int((y2 - b_left) / m_left)
+                x1_right = int((y1 - b_right) / m_right)
+                x2_right = int((y2 - b_right) / m_right)
+                
+                pts = np.array([
+                    [x1_left, y1],
+                    [x2_left, y2],
+                    [x2_right, y2],
+                    [x1_right, y1]
+                ], dtype=np.int32)
+                
+                cv2.fillPoly(lane_image, [pts], (0, 100, 0))
+            except:
+                logger.warning("Şerit dolgu hatası. Değerler geçersiz.")
         
         # Görüntüye şeritleri ekle
         result = cv2.addWeighted(image, 1, lane_image, 0.5, 0)
@@ -362,20 +524,25 @@ class LaneDetector:
         
         # Resmin alt kısmındaki şerit pozisyonları
         y = self.height
-        m_left, b_left = left_lane
-        m_right, b_right = right_lane
         
-        x_left = int((y - b_left) / m_left)
-        x_right = int((y - b_right) / m_right)
-        
-        # Merkezler
-        lane_center = (x_left + x_right) // 2
-        image_center = self.width // 2
-        
-        # Merkez farkı (pozitif = sağa kayma, negatif = sola kayma)
-        center_diff = lane_center - image_center
-        
-        return center_diff
+        try:
+            m_left, b_left = left_lane
+            m_right, b_right = right_lane
+            
+            x_left = int((y - b_left) / m_left)
+            x_right = int((y - b_right) / m_right)
+            
+            # Merkezler
+            lane_center = (x_left + x_right) // 2
+            image_center = self.width // 2
+            
+            # Merkez farkı (pozitif = sağa kayma, negatif = sola kayma)
+            center_diff = lane_center - image_center
+            
+            return center_diff
+        except:
+            logger.warning("Şerit merkezi hesaplanamadı. Değerler geçersiz.")
+            return None
     
     def create_debug_view(self, original_frame, processed_frame, center_diff):
         """
@@ -406,26 +573,52 @@ class LaneDetector:
         resized_processed = cv2.resize(processed_frame, debug_size)
         debug_view[0:debug_height, debug_width:debug_width*2] = resized_processed
         
-        # Debug görüntülerini alt kısma yerleştir
-        if "edges" in self.debug_images:
-            resized_edges = cv2.resize(self.debug_images["edges"], debug_size)
-            debug_view[debug_height:debug_height*2, 0:debug_width] = resized_edges
-            
+        # İlk olarak kuş bakışı görüntüsünü sol alt köşeye yerleştir
         if "bird_eye_view" in self.debug_images:
             resized_bird = cv2.resize(self.debug_images["bird_eye_view"], debug_size)
-            debug_view[debug_height:debug_height*2, debug_width:debug_width*2] = resized_bird
+            debug_view[debug_height:debug_height*2, 0:debug_width] = resized_bird
         
-        # Üst kısma bilgi metni ekle
+        # Sonra renk filtresi görüntüsünü sağ alt köşeye yerleştir
+        if "color_filter" in self.debug_images:
+            resized_color = cv2.resize(self.debug_images["color_filter"], debug_size)
+            debug_view[debug_height:debug_height*2, debug_width:debug_width*2] = resized_color
+        # Eğer renk filtresi yoksa, kenar görüntüsünü göster
+        elif "edges" in self.debug_images:
+            resized_edges = cv2.resize(self.debug_images["edges"], debug_size)
+            debug_view[debug_height:debug_height*2, debug_width:debug_width*2] = resized_edges
+        
+        # Şerit durumu bilgisini ekle
         font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_color = (255, 255, 255)
+        font_thickness = 1
+        
+        # Merkez farkı bilgisini ekle
         if center_diff is not None:
+            # Merkez farkının mutlak değerine göre renk değiştir (kırmızı: çok sapma, yeşil: az sapma)
+            if abs(center_diff) > 100:
+                center_color = (0, 0, 255)  # Kırmızı
+            elif abs(center_diff) > 50:
+                center_color = (0, 165, 255)  # Turuncu
+            else:
+                center_color = (0, 255, 0)  # Yeşil
+                
             cv2.putText(debug_view, f"Merkez Farki: {center_diff}px", 
-                      (10, 30), font, 0.7, (0, 0, 255), 2)
-            
+                      (10, 30), font, font_scale*1.4, center_color, 2)
+        else:
+            cv2.putText(debug_view, "Merkez Farki: Bilinmiyor", 
+                      (10, 30), font, font_scale*1.4, (0, 0, 255), 2)
+        
+        # Şerit kaybı durumunda uyarı ekle
+        if self.lost_lane_counter > 0:
+            cv2.putText(debug_view, f"Serit Kaybi: {self.lost_lane_counter}/{self.max_lost_lane_frames}", 
+                      (debug_width + 10, 30), font, font_scale*1.4, (0, 0, 255), 2)
+        
         # Başlıklar ekle
-        cv2.putText(debug_view, "Orijinal", (10, 15), font, 0.5, (255, 255, 255), 1)
-        cv2.putText(debug_view, "Serit Tespiti", (debug_width+10, 15), font, 0.5, (255, 255, 255), 1)
-        cv2.putText(debug_view, "Kenarlar", (10, debug_height+15), font, 0.5, (255, 255, 255), 1)
-        cv2.putText(debug_view, "Kus Bakisi", (debug_width+10, debug_height+15), font, 0.5, (255, 255, 255), 1)
+        cv2.putText(debug_view, "Orijinal", (10, 15), font, font_scale, font_color, font_thickness)
+        cv2.putText(debug_view, "Serit Tespiti", (debug_width+10, 15), font, font_scale, font_color, font_thickness)
+        cv2.putText(debug_view, "Kus Bakisi", (10, debug_height+15), font, font_scale, font_color, font_thickness)
+        cv2.putText(debug_view, "Renk Filtresi/Kenarlar", (debug_width+10, debug_height+15), font, font_scale, font_color, font_thickness)
         
         return debug_view
     
@@ -439,6 +632,8 @@ class LaneDetector:
         Returns:
             tuple: (İşlenmiş görüntü, merkez pozisyon farkı)
         """
+        start_time = time.time()
+        
         # Debug görüntülerini temizle
         self.debug_images = {}
         
@@ -455,20 +650,45 @@ class LaneDetector:
         # Merkez hesapla
         center_diff = self.calculate_lane_center(left_lane, right_lane)
         
+        # İşlem süresini hesapla
+        process_time = time.time() - start_time
+        
         # Debug modunda merkez çiz
         if self.debug:
+            # Ana görüntüye işlem süresini ekle
+            cv2.putText(result, f"Islem: {process_time*1000:.1f}ms", 
+                      (self.width - 180, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Şerit kaybı durumunda uyarı ekle
+            if self.lost_lane_counter > 0:
+                cv2.putText(result, f"Serit Kaybi: {self.lost_lane_counter}/{self.max_lost_lane_frames}", 
+                          (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
             # Ana görüntüde merkezleri çiz
             if center_diff is not None:
                 image_center = self.width // 2
                 lane_center = image_center + center_diff
-                cv2.circle(result, (image_center, self.height - 30), 5, (255, 0, 0), -1)
-                cv2.circle(result, (lane_center, self.height - 30), 5, (0, 0, 255), -1)
+                
+                # Çizgi kalınlığını sapma miktarına göre ayarla (daha fazla sapma = daha kalın çizgi)
+                line_thickness = max(2, min(5, abs(center_diff) // 20))
+                
+                cv2.circle(result, (image_center, self.height - 30), 5, (255, 0, 0), -1)  # Görüntü merkezi (mavi)
+                cv2.circle(result, (lane_center, self.height - 30), 5, (0, 0, 255), -1)   # Şerit merkezi (kırmızı)
+                
+                # Merkez çizgisini sapma miktarına göre renklendir
+                if abs(center_diff) > 100:
+                    line_color = (0, 0, 255)  # Kırmızı (çok sapma)
+                elif abs(center_diff) > 50:
+                    line_color = (0, 165, 255)  # Turuncu (orta sapma)
+                else:
+                    line_color = (0, 255, 0)  # Yeşil (az sapma)
+                
                 cv2.line(result, (image_center, self.height - 30), 
-                       (lane_center, self.height - 30), (0, 255, 255), 2)
+                       (lane_center, self.height - 30), line_color, line_thickness)
                 
                 # Merkez farkını yaz
                 cv2.putText(result, f"Merkez Farki: {center_diff}", 
-                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, line_color, 2)
                 
             # Birleştirilmiş debug görünümü oluştur
             debug_view = self.create_debug_view(frame, result, center_diff)
