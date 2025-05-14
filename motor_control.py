@@ -9,7 +9,7 @@ PID kontrol ile şerit takibi için gerekli motor hız ayarlarını yapar.
 
 import time
 import logging
-from gpiozero import Motor, PWMOutputDevice
+from gpiozero import DigitalOutputDevice, PWMOutputDevice
 import numpy as np
 
 # Log yapılandırması
@@ -101,15 +101,18 @@ class MotorController:
         self.default_speed = default_speed
         
         try:
-            # PWM çıkışları oluştur (L298N Enable pinleri)
-            logger.info("PWM çıkışları başlatılıyor...")
+            # Pin kontrolü için nesneleri oluştur
+            logger.info("Motor kontrol çıkışları başlatılıyor...")
+            
+            # PWM çıkışları (L298N Enable pinleri)
             self.left_pwm = PWMOutputDevice(self.left_en_pin)
             self.right_pwm = PWMOutputDevice(self.right_en_pin)
             
-            # Motor nesnelerini oluştur
-            logger.info("Motor nesneleri başlatılıyor...")
-            self.left_motor = Motor(forward=self.left_in1_pin, backward=self.left_in2_pin, pwm=False)
-            self.right_motor = Motor(forward=self.right_in1_pin, backward=self.right_in2_pin, pwm=False)
+            # Motor yön kontrol pinleri
+            self.left_in1 = DigitalOutputDevice(self.left_in1_pin, initial_value=False)
+            self.left_in2 = DigitalOutputDevice(self.left_in2_pin, initial_value=False)
+            self.right_in1 = DigitalOutputDevice(self.right_in1_pin, initial_value=False)
+            self.right_in2 = DigitalOutputDevice(self.right_in2_pin, initial_value=False)
             
             # İlk başlangıçta motorları durdur
             self.stop()
@@ -117,14 +120,7 @@ class MotorController:
         except Exception as e:
             logger.error(f"Motor kontrol başlatma hatası: {e}")
             # Hata durumunda temizleme yap
-            if hasattr(self, 'left_pwm'):
-                self.left_pwm.close()
-            if hasattr(self, 'right_pwm'):
-                self.right_pwm.close()
-            if hasattr(self, 'left_motor'):
-                self.left_motor.close()
-            if hasattr(self, 'right_motor'):
-                self.right_motor.close()
+            self.cleanup()
             raise
         
         # PID kontrol için parametreler
@@ -142,27 +138,55 @@ class MotorController:
         
         logger.info("Motor kontrol modülü başlatıldı.")
     
-    def _set_motor_speed(self, motor, pwm_device, speed, direction):
+    def _set_left_motor(self, direction, speed):
         """
-        Motor hızını ve yönünü ayarlar.
+        Sol motoru ayarlar.
         
         Args:
-            motor: Motor nesnesi (left_motor veya right_motor)
-            pwm_device: PWM çıkış cihazı (left_pwm veya right_pwm)
-            speed: Hız değeri (0-1 arası)
-            direction: Yön ('forward' veya 'backward')
+            direction (str): 'forward', 'backward' veya 'stop'
+            speed (float): Hız değeri (0-1 arası)
         """
         # Hız değerini sınırla
         speed = min(max(0, speed), self.max_speed)
         
-        # Yöne göre motoru ayarla
+        # Yöne göre pinleri ayarla
         if direction == 'forward':
-            motor.forward()
-        else:  # backward
-            motor.backward()
-            
-        # PWM ile hızı ayarla
-        pwm_device.value = speed
+            self.left_in1.on()
+            self.left_in2.off()
+            self.left_pwm.value = speed
+        elif direction == 'backward':
+            self.left_in1.off()
+            self.left_in2.on()
+            self.left_pwm.value = speed
+        else:  # stop
+            self.left_in1.off()
+            self.left_in2.off()
+            self.left_pwm.value = 0
+    
+    def _set_right_motor(self, direction, speed):
+        """
+        Sağ motoru ayarlar.
+        
+        Args:
+            direction (str): 'forward', 'backward' veya 'stop'
+            speed (float): Hız değeri (0-1 arası)
+        """
+        # Hız değerini sınırla
+        speed = min(max(0, speed), self.max_speed)
+        
+        # Yöne göre pinleri ayarla
+        if direction == 'forward':
+            self.right_in1.on()
+            self.right_in2.off()
+            self.right_pwm.value = speed
+        elif direction == 'backward':
+            self.right_in1.off()
+            self.right_in2.on()
+            self.right_pwm.value = speed
+        else:  # stop
+            self.right_in1.off()
+            self.right_in2.off()
+            self.right_pwm.value = 0
     
     def forward(self, speed=None):
         """
@@ -174,8 +198,8 @@ class MotorController:
         if speed is None:
             speed = self.default_speed
             
-        self._set_motor_speed(self.left_motor, self.left_pwm, speed, 'forward')
-        self._set_motor_speed(self.right_motor, self.right_pwm, speed, 'forward')
+        self._set_left_motor('forward', speed)
+        self._set_right_motor('forward', speed)
         
         logger.debug(f"İleri hareket: Hız={speed}")
     
@@ -189,8 +213,8 @@ class MotorController:
         if speed is None:
             speed = self.default_speed
             
-        self._set_motor_speed(self.left_motor, self.left_pwm, speed, 'backward')
-        self._set_motor_speed(self.right_motor, self.right_pwm, speed, 'backward')
+        self._set_left_motor('backward', speed)
+        self._set_right_motor('backward', speed)
         
         logger.debug(f"Geri hareket: Hız={speed}")
     
@@ -204,8 +228,8 @@ class MotorController:
         if speed is None:
             speed = self.default_speed
             
-        self._set_motor_speed(self.left_motor, self.left_pwm, speed * 0.2, 'forward')  # Sol motor yavaş
-        self._set_motor_speed(self.right_motor, self.right_pwm, speed, 'forward')      # Sağ motor hızlı
+        self._set_left_motor('forward', speed * 0.2)  # Sol motor yavaş
+        self._set_right_motor('forward', speed)      # Sağ motor hızlı
         
         logger.debug(f"Sola dönüş: Hız={speed}")
     
@@ -219,8 +243,8 @@ class MotorController:
         if speed is None:
             speed = self.default_speed
             
-        self._set_motor_speed(self.left_motor, self.left_pwm, speed, 'forward')      # Sol motor hızlı
-        self._set_motor_speed(self.right_motor, self.right_pwm, speed * 0.2, 'forward') # Sağ motor yavaş
+        self._set_left_motor('forward', speed)      # Sol motor hızlı
+        self._set_right_motor('forward', speed * 0.2) # Sağ motor yavaş
         
         logger.debug(f"Sağa dönüş: Hız={speed}")
     
@@ -228,10 +252,8 @@ class MotorController:
         """
         Aracı durdurur.
         """
-        self.left_motor.stop()
-        self.right_motor.stop()
-        self.left_pwm.value = 0
-        self.right_pwm.value = 0
+        self._set_left_motor('stop', 0)
+        self._set_right_motor('stop', 0)
         
         logger.debug("Araç durduruldu.")
     
@@ -309,8 +331,8 @@ class MotorController:
                 left_speed, right_speed = self.pid_control(center_diff)
                 
                 # Motor hızlarını ayarla
-                self._set_motor_speed(self.left_motor, self.left_pwm, left_speed, 'forward')
-                self._set_motor_speed(self.right_motor, self.right_pwm, right_speed, 'forward')
+                self._set_left_motor('forward', left_speed)
+                self._set_right_motor('forward', right_speed)
                 
                 logger.debug(f"Şerit takibi: Sapma={center_diff}, Sol={left_speed:.2f}, Sağ={right_speed:.2f}")
             except Exception as e:
@@ -323,19 +345,30 @@ class MotorController:
         """
         logger.info("Motor kontrol modülü kapatılıyor...")
         try:
-            self.stop()
+            # Motorları durdur
+            if hasattr(self, 'left_in1') and hasattr(self, 'left_in2'):
+                self.left_in1.off()
+                self.left_in2.off()
             
-            # PWM ve motor pinlerini kapat
+            if hasattr(self, 'right_in1') and hasattr(self, 'right_in2'):
+                self.right_in1.off()
+                self.right_in2.off()
+                
+            # PWM değerlerini sıfırla
             if hasattr(self, 'left_pwm'):
-                self.left_pwm.close()
+                self.left_pwm.value = 0
             if hasattr(self, 'right_pwm'):
-                self.right_pwm.close()
+                self.right_pwm.value = 0
                 
-            if hasattr(self, 'left_motor'):
-                self.left_motor.close()
-            if hasattr(self, 'right_motor'):
-                self.right_motor.close()
-                
+            # Pin kaynaklarını temizle
+            for attr in ['left_in1', 'left_in2', 'right_in1', 'right_in2', 'left_pwm', 'right_pwm']:
+                if hasattr(self, attr):
+                    device = getattr(self, attr)
+                    try:
+                        device.close()
+                    except Exception as e:
+                        logger.warning(f"{attr} kapatma hatası: {e}")
+                        
             logger.info("Motor kontrol modülü kapatıldı.")
         except Exception as e:
             logger.error(f"Motor temizleme hatası: {e}") 

@@ -74,6 +74,10 @@ class LaneDetector:
         # Debug görüntüleri
         self.debug_images = {}
         
+        # Şerit renkleri
+        self.LANE_COLOR = (0, 255, 0)  # Parlak yeşil
+        self.LANE_THICKNESS = 8  # Daha kalın çizgi
+        
         logger.info("Şerit tespit modülü başlatıldı.")
     
     def preprocess_image(self, image):
@@ -193,6 +197,13 @@ class LaneDetector:
         self.last_left_lane = left_lane
         self.last_right_lane = right_lane
         
+        # Ham çizgileri debug için sakla
+        if self.debug:
+            self.raw_lines = {
+                "left_lines": left_lines,
+                "right_lines": right_lines
+            }
+        
         return left_lane, right_lane
     
     def _find_average_line(self, lines):
@@ -266,7 +277,7 @@ class LaneDetector:
         
         return (smooth_m, smooth_b)
     
-    def draw_lanes(self, image, left_lane, right_lane, color=(0, 255, 0), thickness=5):
+    def draw_lanes(self, image, left_lane, right_lane, color=None, thickness=None):
         """
         Tespit edilen şeritleri görüntü üzerine çizer.
         
@@ -274,13 +285,31 @@ class LaneDetector:
             image (numpy.ndarray): Şeritlerin çizileceği görüntü
             left_lane (tuple): Sol şerit parametreleri (eğim, kesişim)
             right_lane (tuple): Sağ şerit parametreleri (eğim, kesişim)
-            color (tuple): Çizgi rengi (B, G, R)
-            thickness (int): Çizgi kalınlığı
+            color (tuple): Çizgi rengi (B, G, R), None ise varsayılan renk kullanılır
+            thickness (int): Çizgi kalınlığı, None ise varsayılan kalınlık kullanılır
             
         Returns:
             numpy.ndarray: Şeritler çizilmiş görüntü
         """
+        if color is None:
+            color = self.LANE_COLOR
+            
+        if thickness is None:
+            thickness = self.LANE_THICKNESS
+        
         lane_image = np.zeros_like(image)
+        
+        # Ham çizgileri göster (sadece debug modunda)
+        if self.debug and hasattr(self, 'raw_lines'):
+            # Sol şerit için ham çizgileri göster
+            for line in self.raw_lines.get("left_lines", []):
+                x1, y1, x2, y2 = line
+                cv2.line(lane_image, (x1, y1), (x2, y2), (255, 0, 0), 1)  # Mavi renk
+                
+            # Sağ şerit için ham çizgileri göster
+            for line in self.raw_lines.get("right_lines", []):
+                x1, y1, x2, y2 = line
+                cv2.line(lane_image, (x1, y1), (x2, y2), (0, 0, 255), 1)  # Kırmızı renk
         
         # Şerit çizimi (kuş bakışı görünümünde)
         if left_lane is not None:
@@ -420,7 +449,7 @@ class LaneDetector:
         # Şeritleri tespit et
         left_lane, right_lane = self.detect_lane_lines(frame)
         
-        # Şeritleri çiz
+        # Şeritleri belirgin yeşil çizgilerle çiz
         result = self.draw_lanes(frame, left_lane, right_lane)
         
         # Merkez hesapla
