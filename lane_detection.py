@@ -361,28 +361,30 @@ class LaneDetector:
             numpy.ndarray: Birleştirilmiş debug görünümü
         """
         # Görüntüleri yeniden boyutlandır
-        debug_size = (320, 240)  # Küçük görüntüler için boyut
+        debug_width = 320
+        debug_height = 240
+        debug_size = (debug_width, debug_height)  # (genişlik, yükseklik)
         
         # Birleştirilmiş görüntü için zemin oluştur (2x2 grid)
-        h, w = debug_size
-        debug_view = np.zeros((h*2, w*2, 3), dtype=np.uint8)
+        # OpenCV görüntüleri (yükseklik, genişlik, kanal) formatında
+        debug_view = np.zeros((debug_height*2, debug_width*2, 3), dtype=np.uint8)
         
         # Orijinal görüntüyü sol üst köşeye yerleştir
         resized_original = cv2.resize(original_frame, debug_size)
-        debug_view[0:h, 0:w] = resized_original
+        debug_view[0:debug_height, 0:debug_width] = resized_original
         
         # İşlenmiş görüntüyü (şeritler çizilmiş) sağ üst köşeye yerleştir
         resized_processed = cv2.resize(processed_frame, debug_size)
-        debug_view[0:h, w:w*2] = resized_processed
+        debug_view[0:debug_height, debug_width:debug_width*2] = resized_processed
         
         # Debug görüntülerini alt kısma yerleştir
         if "edges" in self.debug_images:
             resized_edges = cv2.resize(self.debug_images["edges"], debug_size)
-            debug_view[h:h*2, 0:w] = resized_edges
+            debug_view[debug_height:debug_height*2, 0:debug_width] = resized_edges
             
         if "bird_eye_view" in self.debug_images:
             resized_bird = cv2.resize(self.debug_images["bird_eye_view"], debug_size)
-            debug_view[h:h*2, w:w*2] = resized_bird
+            debug_view[debug_height:debug_height*2, debug_width:debug_width*2] = resized_bird
         
         # Üst kısma bilgi metni ekle
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -392,9 +394,9 @@ class LaneDetector:
             
         # Başlıklar ekle
         cv2.putText(debug_view, "Orijinal", (10, 15), font, 0.5, (255, 255, 255), 1)
-        cv2.putText(debug_view, "Serit Tespiti", (w+10, 15), font, 0.5, (255, 255, 255), 1)
-        cv2.putText(debug_view, "Kenarlar", (10, h+15), font, 0.5, (255, 255, 255), 1)
-        cv2.putText(debug_view, "Kus Bakisi", (w+10, h+15), font, 0.5, (255, 255, 255), 1)
+        cv2.putText(debug_view, "Serit Tespiti", (debug_width+10, 15), font, 0.5, (255, 255, 255), 1)
+        cv2.putText(debug_view, "Kenarlar", (10, debug_height+15), font, 0.5, (255, 255, 255), 1)
+        cv2.putText(debug_view, "Kus Bakisi", (debug_width+10, debug_height+15), font, 0.5, (255, 255, 255), 1)
         
         return debug_view
     
