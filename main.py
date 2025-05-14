@@ -32,10 +32,11 @@ class OtonomArac:
                  framerate=30,
                  debug=False,
                  debug_fps=10,
-                 left_motor_pins=(17, 18),
-                 right_motor_pins=(22, 23),
-                 left_pwm_pin=None,
-                 right_pwm_pin=None):
+                 left_motor_pins=(16, 18),    # Sol motor IN1, IN2 pinleri
+                 right_motor_pins=(36, 38),   # Sağ motor IN1, IN2 pinleri
+                 left_pwm_pin=12,             # Sol motor Enable pini
+                 right_pwm_pin=32,            # Sağ motor Enable pini
+                 use_board_pins=True):        # BOARD pin numaralandırması kullan
         """
         OtonomArac sınıfını başlatır.
         
@@ -44,10 +45,11 @@ class OtonomArac:
             framerate (int): Kare hızı (fps)
             debug (bool): Hata ayıklama modu
             debug_fps (int): Debug modunda gösterilecek maksimum fps
-            left_motor_pins (tuple): Sol motor pinleri (ileri, geri)
-            right_motor_pins (tuple): Sağ motor pinleri (ileri, geri)
-            left_pwm_pin (int): Sol motor PWM pini
-            right_pwm_pin (int): Sağ motor PWM pini
+            left_motor_pins (tuple): Sol motor pinleri (IN1, IN2)
+            right_motor_pins (tuple): Sağ motor pinleri (IN1, IN2)
+            left_pwm_pin (int): Sol motor Enable pini
+            right_pwm_pin (int): Sağ motor Enable pini
+            use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
         """
         self.debug = debug
         self.debug_fps = debug_fps
@@ -75,7 +77,8 @@ class OtonomArac:
             left_pwm_pin=left_pwm_pin,
             right_pwm_pin=right_pwm_pin,
             max_speed=0.8,
-            default_speed=0.4
+            default_speed=0.4,
+            use_board_pins=use_board_pins
         )
         
         # Temiz kapatma için sinyal yakalama
@@ -208,10 +211,11 @@ def parse_arguments():
     parser.add_argument('--fps', type=int, default=30, help='Kare hızı')
     
     # Motor pin argümanları
-    parser.add_argument('--left-motor', nargs=2, type=int, default=[17, 18], help='Sol motor pinleri (ileri geri)')
-    parser.add_argument('--right-motor', nargs=2, type=int, default=[22, 23], help='Sağ motor pinleri (ileri geri)')
-    parser.add_argument('--left-pwm', type=int, help='Sol motor PWM pini')
-    parser.add_argument('--right-pwm', type=int, help='Sağ motor PWM pini')
+    parser.add_argument('--left-motor', nargs=2, type=int, default=[16, 18], help='Sol motor pinleri (IN1 IN2)')
+    parser.add_argument('--right-motor', nargs=2, type=int, default=[36, 38], help='Sağ motor pinleri (IN1 IN2)')
+    parser.add_argument('--left-pwm', type=int, default=12, help='Sol motor Enable pini')
+    parser.add_argument('--right-pwm', type=int, default=32, help='Sağ motor Enable pini')
+    parser.add_argument('--use-bcm', action='store_true', help='BCM pin numaralandırması kullan (varsayılan: BOARD)')
     
     return parser.parse_args()
 
@@ -239,7 +243,8 @@ def main():
         left_motor_pins=tuple(args.left_motor),
         right_motor_pins=tuple(args.right_motor),
         left_pwm_pin=args.left_pwm,
-        right_pwm_pin=args.right_pwm
+        right_pwm_pin=args.right_pwm,
+        use_board_pins=not args.use_bcm  # BCM kullanılacaksa BOARD kullanma
     )
     
     # Sürüşü başlat
