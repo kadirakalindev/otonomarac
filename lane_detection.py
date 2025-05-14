@@ -23,7 +23,7 @@ class LaneDetector:
     """
     Şerit tespit ve takip işlemlerini gerçekleştiren sınıf.
     """
-    def __init__(self, camera_resolution=(640, 480), debug=False):
+    def __init__(self, camera_resolution=(320, 240), debug=False):
         """
         LaneDetector sınıfını başlatır.
         
@@ -38,8 +38,8 @@ class LaneDetector:
         # Perspektif dönüşümü için kaynak ve hedef noktaları
         # Not: Bu değerler kamera pozisyonuna göre kalibre edilmelidir
         self.src_points = np.float32([
-            [self.width * 0.25, self.height * 0.6],  # Sol üst
-            [self.width * 0.75, self.height * 0.6],  # Sağ üst
+            [self.width * 0.35, self.height * 0.65],  # Sol üst - daha iyi perspektif için ayarlandı
+            [self.width * 0.65, self.height * 0.65],  # Sağ üst
             [0, self.height],                       # Sol alt
             [self.width, self.height]                # Sağ alt
         ])
@@ -55,29 +55,29 @@ class LaneDetector:
         self.perspective_M = cv2.getPerspectiveTransform(self.src_points, self.dst_points)
         self.inverse_perspective_M = cv2.getPerspectiveTransform(self.dst_points, self.src_points)
         
-        # Filtre parametreleri
+        # Filtre parametreleri - Dönüşler için iyileştirildi
         self.blur_kernel_size = 5
         self.canny_low_threshold = 50
         self.canny_high_threshold = 150
         
-        # Hough dönüşümü parametreleri
+        # Hough dönüşümü parametreleri - U dönüşleri ve virajlar için optimize edildi
         self.rho = 1
         self.theta = np.pi/180
-        self.hough_threshold = 20
-        self.min_line_length = 20
-        self.max_line_gap = 300
+        self.hough_threshold = 15       # Daha düşük eşik (dönüşlerde çizgileri daha kolay tespit etmek için)
+        self.min_line_length = 15       # Daha kısa çizgileri de tespit et
+        self.max_line_gap = 100         # Optimize edilmiş boşluk toleransı
         
-        # Renk filtresi parametreleri (Beyaz ve sarı şeritler için)
+        # Renk filtresi parametreleri - Siyah zemin üzerinde beyaz şeritler için optimize edildi
         # HSV renk aralıkları
         self.yellow_lower = np.array([15, 80, 120])
         self.yellow_upper = np.array([35, 255, 255])
-        self.white_lower = np.array([0, 0, 200])
-        self.white_upper = np.array([180, 30, 255])
+        self.white_lower = np.array([0, 0, 210])      # Beyaz renk için optimize edildi
+        self.white_upper = np.array([180, 30, 255])   # Tüm beyaz tonları için genişletildi
         
         # Son şerit çizgileri (hafıza)
         self.last_left_lane = None
         self.last_right_lane = None
-        self.smoothing_factor = 0.8  # Yeni ve eski şerit değerlerini birleştirme faktörü
+        self.smoothing_factor = 0.85  # Arttırıldı - kesikli çizgiler için daha iyi takip
         
         # Şerit kaybı durumunu takip etme
         self.lost_lane_counter = 0
@@ -134,7 +134,8 @@ class LaneDetector:
     
     def apply_color_filter(self, image):
         """
-        Görüntüye renk filtresi uygular, beyaz ve sarı şeritleri belirginleştirir.
+        Görüntüye renk filtresi uygular, beyaz şeritleri belirginleştirir.
+        Siyah zemin için optimize edilmiştir.
         
         Args:
             image (numpy.ndarray): İşlenecek renkli görüntü
@@ -145,11 +146,28 @@ class LaneDetector:
         # BGR'dan HSV'ye dönüştür
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Beyaz ve sarı renk maskeleri oluştur
-        white_mask = cv2.inRange(hsv, self.white_lower, self.white_upper)
+        # Gri tonlama için direkt BGR'dan dönüşüm
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Beyaz renk maskeleri oluştur (HSV ve gri tonlama kullanarak)
+        white_mask_hsv = cv2.inRange(hsv, self.white_lower, self.white_upper)
+        
+        # Gri tonlama için otomatik eşikleme (Siyah zemin üzerinde beyaz şeritler için güçlü)
+        _, white_mask_gray = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        
+        # Adaptif eşikleme ekle
+        adaptive_mask = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, -5
+        )
+        
+        # HSV ve gri tonlama maskelerini birleştir
+        white_mask = cv2.bitwise_or(white_mask_hsv, white_mask_gray)
+        white_mask = cv2.bitwise_or(white_mask, adaptive_mask)
+        
+        # Sarı maske oluştur (eğer sarı çizgiler varsa)
         yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
         
-        # Maskeleri birleştir
+        # Tüm maskeleri birleştir
         combined_mask = cv2.bitwise_or(white_mask, yellow_mask)
         
         # Morfolojik işlemler (gürültü azaltma ve şerit kalınlaştırma)
@@ -161,8 +179,10 @@ class LaneDetector:
         if self.debug:
             white_mask_colored = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
             yellow_mask_colored = cv2.cvtColor(yellow_mask, cv2.COLOR_GRAY2BGR)
+            adaptive_mask_colored = cv2.cvtColor(adaptive_mask, cv2.COLOR_GRAY2BGR)
             self.debug_images["white_mask"] = white_mask_colored
             self.debug_images["yellow_mask"] = yellow_mask_colored
+            self.debug_images["adaptive_mask"] = adaptive_mask_colored
             self.debug_images["color_filter"] = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
         
         return combined_mask
@@ -180,7 +200,7 @@ class LaneDetector:
         # Renk filtresi uygula (beyaz ve sarı şeritleri belirginleştir)
         color_filtered = self.apply_color_filter(image)
         
-        # Gri tonlamaya dönüştürme (eğer renk filtresi kullanılmazsa)
+        # Gri tonlamaya dönüştürme
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
         # Gürültü giderme (Gaussian Blur)
@@ -197,12 +217,12 @@ class LaneDetector:
         # Renk filtresi ve kenar tespitini birleştir
         combined = cv2.bitwise_or(color_filtered, edges)
         
-        # İlgi bölgesi belirleme (ROI)
+        # İlgi bölgesi belirleme (ROI) - U dönüşleri için optimize edildi
         roi_mask = np.zeros_like(combined)
         roi_vertices = np.array([
             [0, self.height],
-            [self.width * 0.4, self.height * 0.6],
-            [self.width * 0.6, self.height * 0.6],
+            [self.width * 0.35, self.height * 0.6],  # Daha geniş bir görüş açısı
+            [self.width * 0.65, self.height * 0.6],
             [self.width, self.height]
         ], dtype=np.int32)
         cv2.fillPoly(roi_mask, [roi_vertices], 255)
@@ -215,6 +235,11 @@ class LaneDetector:
             self.debug_images["binary_adaptive"] = cv2.cvtColor(binary_adaptive, cv2.COLOR_GRAY2BGR)
             self.debug_images["masked_edges"] = cv2.cvtColor(masked_edges, cv2.COLOR_GRAY2BGR)
             self.debug_images["combined"] = cv2.cvtColor(combined, cv2.COLOR_GRAY2BGR)
+            
+            # ROI'yi görselleştir
+            roi_viz = image.copy()
+            cv2.polylines(roi_viz, [roi_vertices], True, (0, 0, 255), 2)
+            self.debug_images["roi"] = roi_viz
         
         return masked_edges
     
@@ -277,13 +302,22 @@ class LaneDetector:
                 slope = (y2 - y1) / (x2 - x1)
                 
                 # Çok küçük eğimli yatay çizgileri filtrele
-                if abs(slope) < 0.2:
+                if abs(slope) < 0.3:  # U dönüşleri için eğim toleransını artır (0.2'den 0.3'e)
                     continue
                 
-                # Eğime göre sınıflandır
-                if slope < 0:  # Negatif eğim = Sol şerit
+                # Çizgi uzunluğunu hesapla
+                line_length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                
+                # Çizgi açısını hesapla (derece cinsinden)
+                angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+                
+                # Pozisyona göre sınıflandırma
+                midpoint_x = (x1 + x2) / 2
+                
+                # Eğim ve pozisyona göre sınıflandır
+                if slope < 0 and midpoint_x < self.width * 0.7:  # Sol şerit
                     left_lines.append(line[0])
-                else:  # Pozitif eğim = Sağ şerit
+                elif slope > 0 and midpoint_x > self.width * 0.3:  # Sağ şerit
                     right_lines.append(line[0])
         
         # Şeritleri ortalama hesaplayarak bul
@@ -369,6 +403,7 @@ class LaneDetector:
     def _smooth_lane(self, current_lane, previous_lane):
         """
         Şerit devamsızlığına karşı yumuşatma uygular.
+        Kesikli şeritler için iyileştirildi.
         
         Args:
             current_lane (tuple): Mevcut karedeki şerit parametreleri (eğim, kesişim)
@@ -386,6 +421,7 @@ class LaneDetector:
             return current_lane
             
         # Yumuşatılmış şerit parametrelerini hesapla
+        # Kesikli çizgiler için smoothing_factor değerini artırdık
         smooth_m = self.smoothing_factor * previous_lane[0] + (1 - self.smoothing_factor) * current_lane[0]
         smooth_b = self.smoothing_factor * previous_lane[1] + (1 - self.smoothing_factor) * current_lane[1]
         
