@@ -449,100 +449,189 @@ class LaneDetector:
         
         lane_image = np.zeros_like(image)
         
-        # Ham çizgileri göster (sadece debug modunda)
+        # Ham çizgileri ve şeritleri çiz
         if self.debug and hasattr(self, 'raw_lines'):
-            # Sol şerit için ham çizgileri göster
-            for line in self.raw_lines.get("left_lines", []):
-                x1, y1, x2, y2 = line
-                cv2.line(lane_image, (x1, y1), (x2, y2), (255, 0, 0), 1)  # Mavi renk
+            # Sol şerit için ham çizgileri işle
+            left_points = []
+            if self.raw_lines.get("left_lines", []):
+                for line in self.raw_lines["left_lines"]:
+                    x1, y1, x2, y2 = line
+                    left_points.extend([(x1, y1), (x2, y2)])
+                    cv2.line(lane_image, (x1, y1), (x2, y2), (255, 0, 0), 1)  # Mavi renk
                 
-            # Sağ şerit için ham çizgileri göster
-            for line in self.raw_lines.get("right_lines", []):
-                x1, y1, x2, y2 = line
-                cv2.line(lane_image, (x1, y1), (x2, y2), (0, 0, 255), 1)  # Kırmızı renk
-        
-        # Şerit kaybı durumunda uyarı mesajı
-        if left_lane is None and right_lane is None:
-            if self.debug:
-                cv2.putText(image, "UYARI: Serit bulunamadi!", 
-                          (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            return image
-        
-        # Şerit çizimi (kuş bakışı görünümünde)
-        if left_lane is not None:
-            m_left, b_left = left_lane
-            y1 = self.height
-            y2 = int(self.height * 0.6)
+                # Sol şerit noktalarını y koordinatına göre sırala
+                left_points.sort(key=lambda p: p[1], reverse=True)  # Y'ye göre büyükten küçüğe sırala
+                
+                # Şerit noktalarını filtrele ve pürüzsüzleştir
+                filtered_left = self._smooth_points(left_points)
+                
+                # Şeridin üzerinde yeşil çizgi çiz
+                if len(filtered_left) > 1:
+                    for i in range(len(filtered_left)-1):
+                        cv2.line(lane_image, filtered_left[i], filtered_left[i+1], 
+                                (0, 255, 0), thickness)  # Yeşil renk
             
-            # Değerler sınırların içinde mi kontrol et
-            try:
-                x1_left = int((y1 - b_left) / m_left)
-                x2_left = int((y2 - b_left) / m_left)
+            # Sağ şerit için ham çizgileri işle
+            right_points = []
+            if self.raw_lines.get("right_lines", []):
+                for line in self.raw_lines["right_lines"]:
+                    x1, y1, x2, y2 = line
+                    right_points.extend([(x1, y1), (x2, y2)])
+                    cv2.line(lane_image, (x1, y1), (x2, y2), (0, 0, 255), 1)  # Kırmızı renk
                 
-                # Şerit çizgisini çiz
-                cv2.line(lane_image, (x1_left, y1), (x2_left, y2), color, thickness)
+                # Sağ şerit noktalarını y koordinatına göre sırala
+                right_points.sort(key=lambda p: p[1], reverse=True)  # Y'ye göre büyükten küçüğe sırala
                 
-                # Pulsating effect (debug modunda)
-                if self.debug:
-                    pulse_color = (0, 255, 255)  # Sarı
-                    pulse_width = int(thickness / 2)
-                    
-                    # Daha görünür bir efekt için ana şeritin üzerine ince bir çizgi
-                    cv2.line(lane_image, (x1_left, y1), (x2_left, y2), pulse_color, pulse_width)
-            except:
-                logger.warning("Sol şerit çizimi hatası. Değerler geçersiz.")
+                # Şerit noktalarını filtrele ve pürüzsüzleştir
+                filtered_right = self._smooth_points(right_points)
+                
+                # Şeridin üzerinde yeşil çizgi çiz
+                if len(filtered_right) > 1:
+                    for i in range(len(filtered_right)-1):
+                        cv2.line(lane_image, filtered_right[i], filtered_right[i+1], 
+                                (0, 255, 0), thickness)  # Yeşil renk
         
-        if right_lane is not None:
-            m_right, b_right = right_lane
-            y1 = self.height
-            y2 = int(self.height * 0.6)
+        # Eğer ham çizgiler yoksa ya da debug modunda değilsek, parametrik çizileri kullan
+        else:
+            # Şerit kaybı durumunda uyarı mesajı
+            if left_lane is None and right_lane is None:
+                if self.debug:
+                    cv2.putText(image, "UYARI: Serit bulunamadi!", 
+                            (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+                return image
             
-            try:
-                x1_right = int((y1 - b_right) / m_right)
-                x2_right = int((y2 - b_right) / m_right)
-                
-                # Şerit çizgisini çiz
-                cv2.line(lane_image, (x1_right, y1), (x2_right, y2), color, thickness)
-                
-                # Pulsating effect (debug modunda)
-                if self.debug:
-                    pulse_color = (0, 255, 255)  # Sarı
-                    pulse_width = int(thickness / 2)
-                    
-                    # Daha görünür bir efekt için ana şeritin üzerine ince bir çizgi
-                    cv2.line(lane_image, (x1_right, y1), (x2_right, y2), pulse_color, pulse_width)
-            except:
-                logger.warning("Sağ şerit çizimi hatası. Değerler geçersiz.")
-        
-        # Şeritler arasını doldur (eğer her iki şerit de mevcutsa)
-        if left_lane is not None and right_lane is not None:
-            try:
+            # Sol şerit için parametrik çizim
+            if left_lane is not None:
                 m_left, b_left = left_lane
+                
+                # Y değerlerini yolun altından üstüne doğru belirli aralıklarla oluştur
+                y_values = np.linspace(self.height, int(self.height * 0.6), 20)
+                
+                # Her y değeri için x hesapla
+                points = []
+                for y in y_values:
+                    try:
+                        x = int((y - b_left) / m_left)
+                        if 0 <= x < self.width:  # Görüntü sınırları içinde kontrol et
+                            points.append((x, int(y)))
+                    except:
+                        pass
+                
+                # Şerit çizgisini çiz
+                if len(points) > 1:
+                    for i in range(len(points)-1):
+                        cv2.line(lane_image, points[i], points[i+1], color, thickness)
+            
+            # Sağ şerit için parametrik çizim
+            if right_lane is not None:
                 m_right, b_right = right_lane
                 
-                y1 = self.height
-                y2 = int(self.height * 0.6)
+                # Y değerlerini yolun altından üstüne doğru belirli aralıklarla oluştur
+                y_values = np.linspace(self.height, int(self.height * 0.6), 20)
                 
-                x1_left = int((y1 - b_left) / m_left)
-                x2_left = int((y2 - b_left) / m_left)
-                x1_right = int((y1 - b_right) / m_right)
-                x2_right = int((y2 - b_right) / m_right)
+                # Her y değeri için x hesapla
+                points = []
+                for y in y_values:
+                    try:
+                        x = int((y - b_right) / m_right)
+                        if 0 <= x < self.width:  # Görüntü sınırları içinde kontrol et
+                            points.append((x, int(y)))
+                    except:
+                        pass
                 
-                pts = np.array([
-                    [x1_left, y1],
-                    [x2_left, y2],
-                    [x2_right, y2],
-                    [x1_right, y1]
-                ], dtype=np.int32)
-                
-                cv2.fillPoly(lane_image, [pts], (0, 100, 0))
-            except:
-                logger.warning("Şerit dolgu hatası. Değerler geçersiz.")
+                # Şerit çizgisini çiz
+                if len(points) > 1:
+                    for i in range(len(points)-1):
+                        cv2.line(lane_image, points[i], points[i+1], color, thickness)
+            
+            # Şeritler arasını doldur (eğer her iki şerit de mevcutsa)
+            if left_lane is not None and right_lane is not None:
+                try:
+                    m_left, b_left = left_lane
+                    m_right, b_right = right_lane
+                    
+                    y1 = self.height
+                    y2 = int(self.height * 0.6)
+                    
+                    x1_left = int((y1 - b_left) / m_left)
+                    x2_left = int((y2 - b_left) / m_left)
+                    x1_right = int((y1 - b_right) / m_right)
+                    x2_right = int((y2 - b_right) / m_right)
+                    
+                    pts = np.array([
+                        [x1_left, y1],
+                        [x2_left, y2],
+                        [x2_right, y2],
+                        [x1_right, y1]
+                    ], dtype=np.int32)
+                    
+                    cv2.fillPoly(lane_image, [pts], (0, 100, 0))
+                except:
+                    logger.warning("Şerit dolgu hatası. Değerler geçersiz.")
         
         # Görüntüye şeritleri ekle
         result = cv2.addWeighted(image, 1, lane_image, 0.5, 0)
         
         return result
+    
+    def _smooth_points(self, points, window_size=5, distance_threshold=30):
+        """
+        Şerit noktalarını filtreler ve pürüzsüzleştirir
+        
+        Args:
+            points (list): Şerit noktaları listesi [(x1,y1), (x2,y2), ...]
+            window_size (int): Pürüzsüzleştirme pencere boyutu
+            distance_threshold (int): Noktalar arası maksimum uzaklık eşiği
+            
+        Returns:
+            list: Filtrelenmiş ve pürüzsüzleştirilmiş noktalar
+        """
+        if len(points) < 2:
+            return points
+        
+        # Noktaları benzersiz yap ve y değerine göre sırala
+        unique_points = []
+        y_values = set()
+        
+        for x, y in points:
+            if y not in y_values:
+                unique_points.append((x, y))
+                y_values.add(y)
+        
+        unique_points.sort(key=lambda p: p[1], reverse=True)  # Y'ye göre büyükten küçüğe sırala
+        
+        # Uzak noktaları filtrele
+        filtered_points = [unique_points[0]]  # İlk noktayı ekle
+        
+        for i in range(1, len(unique_points)):
+            prev_x, prev_y = filtered_points[-1]
+            curr_x, curr_y = unique_points[i]
+            
+            # Öklid mesafesi hesapla
+            distance = np.sqrt((curr_x - prev_x)**2 + (curr_y - prev_y)**2)
+            
+            if distance < distance_threshold:
+                filtered_points.append((curr_x, curr_y))
+        
+        # Pürüzsüzleştirme (hareketli ortalama)
+        if len(filtered_points) < window_size:
+            return filtered_points
+            
+        smoothed_points = []
+        half_window = window_size // 2
+        
+        for i in range(len(filtered_points)):
+            # Pencere sınırlarını belirle
+            start = max(0, i - half_window)
+            end = min(len(filtered_points), i + half_window + 1)
+            
+            # Penceredeki x değerlerinin ortalamasını al
+            window_points = filtered_points[start:end]
+            avg_x = sum(p[0] for p in window_points) // len(window_points)
+            
+            smoothed_points.append((avg_x, filtered_points[i][1]))
+        
+        return smoothed_points
     
     def calculate_lane_center(self, left_lane, right_lane):
         """
