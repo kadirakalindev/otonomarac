@@ -146,43 +146,67 @@ class LaneDetector:
         # BGR'dan HSV'ye dönüştür
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
+        # Parlaklık kanalını ayır
+        h, s, v = cv2.split(hsv)
+        
+        # LAB renk uzayını kullan - beyaz şeritler için daha iyi
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        
         # Gri tonlama için direkt BGR'dan dönüşüm
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Beyaz renk maskeleri oluştur (HSV ve gri tonlama kullanarak)
+        # Beyaz renk maskeleri oluştur
+        # HSV beyaz maskesi - geniş spektrum
         white_mask_hsv = cv2.inRange(hsv, self.white_lower, self.white_upper)
         
-        # Gri tonlama için otomatik eşikleme (Siyah zemin üzerinde beyaz şeritler için güçlü)
-        _, white_mask_gray = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        # Parlaklık bazlı maske - daha hassas (yüksek parlaklık = potansiyel beyaz şerit)
+        _, white_mask_v = cv2.threshold(v, 210, 255, cv2.THRESH_BINARY)
         
-        # Adaptif eşikleme ekle
+        # L kanalı bazlı maske (LAB renk uzayı) - beyaz şeritler için iyi
+        _, white_mask_l = cv2.threshold(l_channel, 210, 255, cv2.THRESH_BINARY)
+        
+        # Gri tonlama için adaptif eşikleme - değişken ışık koşulları için
         adaptive_mask = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, -5
         )
         
-        # HSV ve gri tonlama maskelerini birleştir
-        white_mask = cv2.bitwise_or(white_mask_hsv, white_mask_gray)
+        # Güçlendirilmiş beyaz maske - tüm beyaz maskeleri birleştir
+        white_mask = cv2.bitwise_or(white_mask_hsv, white_mask_v)
+        white_mask = cv2.bitwise_or(white_mask, white_mask_l)
         white_mask = cv2.bitwise_or(white_mask, adaptive_mask)
         
         # Sarı maske oluştur (eğer sarı çizgiler varsa)
         yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
         
+        # İyileştirilmiş sarı algılama - a kanalı (LAB) yeşil-kırmızı spektrumu gösterir
+        # Sarı çizgiler pozitif a değerlerine sahiptir
+        _, yellow_a_mask = cv2.threshold(a_channel, 120, 255, cv2.THRESH_BINARY)
+        yellow_mask = cv2.bitwise_or(yellow_mask, yellow_a_mask)
+        
         # Tüm maskeleri birleştir
         combined_mask = cv2.bitwise_or(white_mask, yellow_mask)
         
         # Morfolojik işlemler (gürültü azaltma ve şerit kalınlaştırma)
-        kernel = np.ones((5, 5), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        # Önce küçük noktaları kaldır (açma işlemi)
+        kernel_open = np.ones((3, 3), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_open)
+        
+        # Sonra şeritleri birleştir/kalınlaştır (kapama işlemi)
+        kernel_close = np.ones((5, 5), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close)
         
         # Debug için maskeleri kaydet
         if self.debug:
             white_mask_colored = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
             yellow_mask_colored = cv2.cvtColor(yellow_mask, cv2.COLOR_GRAY2BGR)
             adaptive_mask_colored = cv2.cvtColor(adaptive_mask, cv2.COLOR_GRAY2BGR)
+            v_mask_colored = cv2.cvtColor(white_mask_v, cv2.COLOR_GRAY2BGR)
+            
             self.debug_images["white_mask"] = white_mask_colored
             self.debug_images["yellow_mask"] = yellow_mask_colored
             self.debug_images["adaptive_mask"] = adaptive_mask_colored
+            self.debug_images["brightness_mask"] = v_mask_colored
             self.debug_images["color_filter"] = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
         
         return combined_mask
@@ -197,32 +221,44 @@ class LaneDetector:
         Returns:
             numpy.ndarray: İşlenmiş görüntü
         """
-        # Renk filtresi uygula (beyaz ve sarı şeritleri belirginleştir)
+        # İlk olarak renk filtreleme uygula (daha güçlü şerit tespiti için)
         color_filtered = self.apply_color_filter(image)
         
-        # Gri tonlamaya dönüştürme
+        # Gri tonlamaya dönüştürme (eğer renk filtresi yeterince iyi değilse tamamlayıcı olarak kullan)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Gürültü giderme (Gaussian Blur)
-        blurred = cv2.GaussianBlur(gray, (self.blur_kernel_size, self.blur_kernel_size), 0)
+        # Gürültü giderme (İyileştirilmiş Gaussian Blur)
+        # Kenarları korumak için önce bilateral filtre uygula
+        bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
+        blurred = cv2.GaussianBlur(bilateral, (self.blur_kernel_size, self.blur_kernel_size), 0)
         
-        # Kenar tespiti (Canny)
-        edges = cv2.Canny(blurred, self.canny_low_threshold, self.canny_high_threshold)
+        # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        # Değişken ışık koşullarında daha iyi kontrast sağlar
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(blurred)
+        
+        # Kenar tespiti (Canny) - parametreleri ince ayarla
+        edges = cv2.Canny(enhanced, self.canny_low_threshold, self.canny_high_threshold)
         
         # Adaptif eşikleme (değişken ışık koşulları için)
-        _, binary_adaptive = cv2.threshold(
-            blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        thresh_binary = cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, -2
         )
         
         # Renk filtresi ve kenar tespitini birleştir
         combined = cv2.bitwise_or(color_filtered, edges)
+        combined = cv2.bitwise_or(combined, thresh_binary)
         
-        # İlgi bölgesi belirleme (ROI) - U dönüşleri için optimize edildi
+        # Morfolojik işlemler - kenarları güçlendir
+        kernel = np.ones((3, 3), np.uint8)
+        combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
+        
+        # İlgi bölgesi belirleme (ROI) - optimize edilmiş şekli
         roi_mask = np.zeros_like(combined)
         roi_vertices = np.array([
             [0, self.height],
-            [self.width * 0.35, self.height * 0.6],  # Daha geniş bir görüş açısı
-            [self.width * 0.65, self.height * 0.6],
+            [self.width * 0.35, self.height * 0.55],  # Daha yukarıdan başla
+            [self.width * 0.65, self.height * 0.55],
             [self.width, self.height]
         ], dtype=np.int32)
         cv2.fillPoly(roi_mask, [roi_vertices], 255)
@@ -231,8 +267,8 @@ class LaneDetector:
         # Debug görüntülerini kaydet
         if self.debug:
             self.debug_images["gray"] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            self.debug_images["enhanced"] = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
             self.debug_images["edges"] = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-            self.debug_images["binary_adaptive"] = cv2.cvtColor(binary_adaptive, cv2.COLOR_GRAY2BGR)
             self.debug_images["masked_edges"] = cv2.cvtColor(masked_edges, cv2.COLOR_GRAY2BGR)
             self.debug_images["combined"] = cv2.cvtColor(combined, cv2.COLOR_GRAY2BGR)
             
@@ -302,33 +338,38 @@ class LaneDetector:
                 slope = (y2 - y1) / (x2 - x1)
                 
                 # Çok küçük eğimli yatay çizgileri filtrele
-                if abs(slope) < 0.3:  # U dönüşleri için eğim toleransını artır (0.2'den 0.3'e)
+                if abs(slope) < 0.3:
                     continue
                 
                 # Çizgi uzunluğunu hesapla
                 line_length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
                 
-                # Çizgi açısını hesapla (derece cinsinden)
-                angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+                # Çok kısa çizgileri filtrele (gürültü olabilir)
+                if line_length < self.min_line_length:
+                    continue
                 
                 # Pozisyona göre sınıflandırma
                 midpoint_x = (x1 + x2) / 2
                 
-                # Eğim ve pozisyona göre sınıflandır
+                # İyileştirilmiş çizgi sınıflandırma mantığı
                 if slope < 0 and midpoint_x < self.width * 0.7:  # Sol şerit
-                    left_lines.append(line[0])
+                    # Çok aykırı eğimli çizgileri filtrele (sol şerit için)
+                    if -1.0 < slope < -0.2:
+                        left_lines.append(line[0])
                 elif slope > 0 and midpoint_x > self.width * 0.3:  # Sağ şerit
-                    right_lines.append(line[0])
+                    # Çok aykırı eğimli çizgileri filtrele (sağ şerit için)
+                    if 0.2 < slope < 1.0:
+                        right_lines.append(line[0])
         
         # Şeritleri ortalama hesaplayarak bul
-        left_lane = self._find_average_line(left_lines)
-        right_lane = self._find_average_line(right_lines)
+        left_lane = self._find_weighted_average_line(left_lines)
+        right_lane = self._find_weighted_average_line(right_lines)
         
         # Şerit kaybı durumunu takip et
         if left_lane is None and right_lane is None:
             self.lost_lane_counter += 1
         else:
-            self.lost_lane_counter = 0
+            self.lost_lane_counter = max(0, self.lost_lane_counter - 1)  # Kademeli azalt
             
         # Belirli bir süre şerit bulunamazsa durumu sıfırla
         if self.lost_lane_counter > self.max_lost_lane_frames:
@@ -340,6 +381,17 @@ class LaneDetector:
         # Şerit devamsızlığına karşı düzeltme (önceki karelerden bilgi kullan)
         left_lane = self._smooth_lane(left_lane, self.last_left_lane)
         right_lane = self._smooth_lane(right_lane, self.last_right_lane)
+        
+        # Sol veya sağ şeritten sadece biri algılanırsa diğerini tahmin et
+        if left_lane is not None and right_lane is None and self.last_right_lane is not None:
+            # Sol şerit algılandı, sağ şeridi tahmin et
+            estimated_right_lane = self._estimate_parallel_lane(left_lane, is_right=True)
+            right_lane = self._smooth_lane(estimated_right_lane, self.last_right_lane)
+            
+        elif right_lane is not None and left_lane is None and self.last_left_lane is not None:
+            # Sağ şerit algılandı, sol şeridi tahmin et
+            estimated_left_lane = self._estimate_parallel_lane(right_lane, is_right=False)
+            left_lane = self._smooth_lane(estimated_left_lane, self.last_left_lane)
         
         # Önceki şeritleri güncelle
         self.last_left_lane = left_lane
@@ -354,9 +406,9 @@ class LaneDetector:
         
         return left_lane, right_lane
     
-    def _find_average_line(self, lines):
+    def _find_weighted_average_line(self, lines):
         """
-        Verilen çizgilerin ortalama eğimini ve kesişim noktasını hesaplar.
+        Verilen çizgilerin uzunluk ağırlıklı ortalama eğimini ve kesişim noktasını hesaplar.
         
         Args:
             lines (list): Çizgi noktaları listesi
@@ -370,6 +422,7 @@ class LaneDetector:
         x_sum = 0
         y_sum = 0
         m_sum = 0
+        total_weight = 0
         
         for line in lines:
             x1, y1, x2, y2 = line
@@ -380,18 +433,22 @@ class LaneDetector:
                 
             m = (y2 - y1) / (x2 - x1)
             
+            # Çizgi uzunluğunu ağırlık olarak kullan
+            weight = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            
             # Kesişim hesapla (y = mx + b -> b = y - mx)
             b = y1 - m * x1
             
-            m_sum += m
-            x_sum += (x1 + x2) / 2
-            y_sum += (y1 + y2) / 2
+            m_sum += m * weight
+            x_sum += ((x1 + x2) / 2) * weight
+            y_sum += ((y1 + y2) / 2) * weight
+            total_weight += weight
         
-        if len(lines) > 0:
-            # Ortalama eğim ve nokta
-            m_avg = m_sum / len(lines)
-            x_avg = x_sum / len(lines)
-            y_avg = y_sum / len(lines)
+        if total_weight > 0:
+            # Ağırlıklı ortalama eğim ve nokta
+            m_avg = m_sum / total_weight
+            x_avg = x_sum / total_weight
+            y_avg = y_sum / total_weight
             
             # Ortalama kesişim
             b_avg = y_avg - m_avg * x_avg
@@ -399,6 +456,35 @@ class LaneDetector:
             return (m_avg, b_avg)
         else:
             return None
+    
+    def _estimate_parallel_lane(self, detected_lane, is_right=True):
+        """
+        Bir şeritten diğerini tahmin eder (paralel şeritler varsayımı ile)
+        
+        Args:
+            detected_lane (tuple): Algılanan şerit (eğim, kesişim)
+            is_right (bool): Tahmin edilecek şerit sağ şerit mi
+            
+        Returns:
+            tuple: Tahmin edilen şerit parametreleri (eğim, kesişim)
+        """
+        if detected_lane is None:
+            return None
+            
+        m, b = detected_lane
+        
+        # Ortalama şerit genişliği (piksel cinsinden)
+        lane_width = self.width * 0.5  # Görüntü genişliğinin ~%50'si
+        
+        # Eğim aynı, kesişim farklı
+        if is_right:
+            # Sağ şeridi tahmin et (kesişim noktasını sağa kaydır)
+            new_b = b - m * lane_width
+        else:
+            # Sol şeridi tahmin et (kesişim noktasını sola kaydır)
+            new_b = b + m * lane_width
+            
+        return (m, new_b)
     
     def _smooth_lane(self, current_lane, previous_lane):
         """

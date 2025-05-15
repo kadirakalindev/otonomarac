@@ -54,33 +54,37 @@ class OtonomArac:
         self.debug = debug
         self.debug_fps = debug_fps
         self.running = False
+        self.camera_resolution = camera_resolution
+        self.framerate = framerate
+        self.camera = None  # Başlangıçta None olarak tanımla
         
-        # Kamera başlatma
-        logger.info("Kamera başlatılıyor...")
-        self.camera = Picamera2()
+        # Modülleri başlatma denemesi - hata durumunda güvenli kapatma
+        try:
+            # Kamera başlatma - güvenli başlatma için try-except kullan
+            self._initialize_camera()
+            
+            # Şerit tespit modülünü başlat
+            logger.info("Şerit tespit modülü başlatılıyor...")
+            self.lane_detector = LaneDetector(camera_resolution=camera_resolution, debug=debug)
+            
+            # Motor kontrol modülünü başlat
+            logger.info("Motor kontrol modülü başlatılıyor...")
+            self.motor_controller = MotorController(
+                left_motor_pins=left_motor_pins,
+                right_motor_pins=right_motor_pins,
+                left_pwm_pin=left_pwm_pin,
+                right_pwm_pin=right_pwm_pin,
+                max_speed=0.8,
+                default_speed=0.4,
+                use_board_pins=use_board_pins
+            )
         
-        # Kamera yapılandırması
-        self.camera_config = self.camera.create_preview_configuration(
-            main={"size": camera_resolution, "format": "RGB888"},
-            controls={"FrameRate": framerate}
-        )
-        self.camera.configure(self.camera_config)
-        
-        # Modülleri başlat
-        logger.info("Şerit tespit modülü başlatılıyor...")
-        self.lane_detector = LaneDetector(camera_resolution=camera_resolution, debug=debug)
-        
-        logger.info("Motor kontrol modülü başlatılıyor...")
-        self.motor_controller = MotorController(
-            left_motor_pins=left_motor_pins,
-            right_motor_pins=right_motor_pins,
-            left_pwm_pin=left_pwm_pin,
-            right_pwm_pin=right_pwm_pin,
-            max_speed=0.8,
-            default_speed=0.4,
-            use_board_pins=use_board_pins
-        )
-        
+        except Exception as e:
+            logger.error(f"Başlatma hatası: {e}")
+            # Kısmi başlatılmış kaynakları temizle
+            self.cleanup()
+            raise
+            
         # Temiz kapatma için sinyal yakalama
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -91,6 +95,37 @@ class OtonomArac:
         self.fps_start_time = 0
         
         logger.info("Otonom araç başlatıldı.")
+    
+    def _initialize_camera(self):
+        """
+        Kamera modülünü başlatır ve yapılandırır
+        """
+        try:
+            logger.info("Kamera başlatılıyor...")
+            self.camera = Picamera2()
+            
+            # Kamera yapılandırması
+            self.camera_config = self.camera.create_preview_configuration(
+                main={"size": self.camera_resolution, "format": "RGB888"},
+                controls={"FrameRate": self.framerate}
+            )
+            self.camera.configure(self.camera_config)
+            
+            # Kamera özel ayarlarını düzenleme (daha iyi şerit tespiti için)
+            controls = {
+                "AwbEnable": True,          # Otomatik beyaz dengesi
+                "AeEnable": True,           # Otomatik pozlama
+                "AwbMode": 0,               # Auto (otomatik beyaz dengesi modu)
+                "ExposureTime": 20000,      # Pozlama süresi - düşük değer = daha az bulanıklık
+                "Sharpness": 2.0,           # Keskinlik - netliği artır
+                "Contrast": 1.2             # Kontrast - şeritleri daha belirgin hale getir
+            }
+            self.camera.set_controls(controls)
+            
+            logger.info("Kamera yapılandırması tamamlandı.")
+        except Exception as e:
+            logger.error(f"Kamera başlatma hatası: {e}")
+            raise
     
     def signal_handler(self, sig, frame):
         """
@@ -111,12 +146,26 @@ class OtonomArac:
         logger.info("Otonom sürüş başlatılıyor...")
         self.running = True
         
+        if self.camera is None:
+            try:
+                self._initialize_camera()
+            except Exception as e:
+                logger.error(f"Kamera başlatılamadı: {e}")
+                self.cleanup()
+                return
+        
         # Kamerayı başlat
-        self.camera.start()
+        try:
+            self.camera.start()
+        except Exception as e:
+            logger.error(f"Kamera akışı başlatılamadı: {e}")
+            self.cleanup()
+            return
         
         try:
-            # Çalışma başlangıcında biraz beklet
-            time.sleep(2)
+            # Çalışma başlangıcında biraz beklet (kameranın dengelenmesi için)
+            logger.info("Kamera dengeleniyor...")
+            time.sleep(1.5)
             
             # FPS hesaplama değişkenlerini başlat
             self.fps_start_time = time.time()
@@ -131,44 +180,85 @@ class OtonomArac:
             last_debug_update = 0
             debug_frame_interval = 1.0 / self.debug_fps if self.debug_fps > 0 else 0
             
+            # Hata sayacı (sürekli hata durumunu takip etmek için)
+            error_count = 0
+            max_errors = 10  # Maksimum kabul edilebilir ardışık hata sayısı
+            
             # Ana döngü
             while self.running:
-                # Kameradan görüntü al
-                frame = self.camera.capture_array()
-                
-                # Görüntüyü işle ve şeritleri tespit et
-                processed_frame, center_diff = self.lane_detector.process_frame(frame)
-                
-                # Şeritlere göre motoru kontrol et
-                self.motor_controller.follow_lane(center_diff)
-                
-                # FPS hesapla
-                self.frame_count += 1
-                elapsed_time = time.time() - self.fps_start_time
-                if elapsed_time >= 1.0:
-                    self.fps = self.frame_count / elapsed_time
-                    self.fps_start_time = time.time()
-                    self.frame_count = 0
-                    logger.debug(f"FPS: {self.fps:.1f}")
-                
-                # Debug modunda görüntüyü göster (fps sınırlandırması ile)
-                if self.debug:
-                    current_time = time.time()
-                    if current_time - last_debug_update >= debug_frame_interval:
-                        # FPS bilgisini görüntüye ekle
-                        cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", 
-                                  (processed_frame.shape[1] - 120, 30), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                        
-                        # Görüntüyü göster
-                        cv2.imshow("Otonom Arac", processed_frame)
-                        last_debug_update = current_time
-                        
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                try:
+                    # Kameradan görüntü al
+                    frame = self.camera.capture_array()
+                    
+                    # Görüntüyü işle ve şeritleri tespit et
+                    processed_frame, center_diff = self.lane_detector.process_frame(frame)
+                    
+                    # Şeritlere göre motoru kontrol et
+                    self.motor_controller.follow_lane(center_diff)
+                    
+                    # Hata sayacını sıfırla (başarıyla işlendi)
+                    error_count = 0
+                    
+                    # FPS hesapla
+                    self.frame_count += 1
+                    elapsed_time = time.time() - self.fps_start_time
+                    if elapsed_time >= 1.0:
+                        self.fps = self.frame_count / elapsed_time
+                        self.fps_start_time = time.time()
+                        self.frame_count = 0
+                        logger.debug(f"FPS: {self.fps:.1f}")
+                    
+                    # Debug modunda görüntüyü göster (fps sınırlandırması ile)
+                    if self.debug:
+                        current_time = time.time()
+                        if current_time - last_debug_update >= debug_frame_interval:
+                            # FPS bilgisini görüntüye ekle
+                            cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", 
+                                      (processed_frame.shape[1] - 120, 30), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            
+                            # Görüntüyü göster
+                            cv2.imshow("Otonom Arac", processed_frame)
+                            last_debug_update = current_time
+                            
+                            # Tuş basımlarını kontrol et
+                            key = cv2.waitKey(1) & 0xFF
+                            
+                            # q tuşuna basılırsa çık
+                            if key == ord('q'):
+                                logger.info("Kullanıcı tarafından durduruldu")
+                                break
+                                
+                            # s tuşuna basılırsa görüntüyü kaydet
+                            elif key == ord('s'):
+                                filename = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+                                cv2.imwrite(filename, processed_frame)
+                                logger.info(f"Ekran görüntüsü kaydedildi: {filename}")
+                                
+                except KeyboardInterrupt:
+                    logger.info("Kullanıcı tarafından durduruldu (CTRL+C)")
+                    break
+                    
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"İşleme hatası ({error_count}/{max_errors}): {e}")
+                    
+                    # Çok sayıda ardışık hata olursa durumu yeniden başlat
+                    if error_count >= max_errors:
+                        logger.critical(f"Çok fazla ardışık hata! Program yeniden başlatılıyor.")
+                        self.stop()
+                        self.cleanup()
+                        # Kamerayı yeniden başlat
+                        try:
+                            self._initialize_camera()
+                            self.camera.start()
+                            time.sleep(1)  # Kameranın dengelenmesi için bekle
+                        except:
+                            logger.critical("Kamera yeniden başlatılamadı! Çıkılıyor.")
                             break
                 
         except Exception as e:
-            logger.error(f"Hata oluştu: {e}")
+            logger.error(f"Ana döngü hatası: {e}")
         finally:
             self.cleanup()
     
@@ -191,8 +281,11 @@ class OtonomArac:
             self.motor_controller.cleanup()
         
         # Kamerayı kapat
-        if hasattr(self, 'camera'):
-            self.camera.stop()
+        if hasattr(self, 'camera') and self.camera is not None:
+            try:
+                self.camera.stop()
+            except:
+                pass
         
         # OpenCV pencerelerini kapat
         if self.debug:

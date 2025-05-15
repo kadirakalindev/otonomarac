@@ -115,11 +115,16 @@ class MotorController:
             self.cleanup()
             raise
         
-        # PID kontrol için parametreler
-        # Not: Bu parametreler test edilerek ince ayar yapılmalıdır
-        self.kp = 0.5  # Orantısal katsayı
-        self.ki = 0.0  # Integral katsayı
-        self.kd = 0.1  # Türev katsayı
+        # Optimize edilmiş PID kontrol parametreleri
+        self.kp = 0.7   # Orantısal katsayı - arttırıldı, daha hızlı tepki için
+        self.ki = 0.05  # Integral katsayı - düşük değerde başlatıldı
+        self.kd = 0.15  # Türev katsayı - arttırıldı, daha az salınım için
+        
+        # PID sınır değerleri
+        self.max_integral = 100.0  # İntegral terimini sınırla (windup'u önlemek için)
+        
+        # Hız limitleri
+        self.min_motor_speed = 0.2  # Minimum motor hızı (durma noktasını önler)
         
         # PID hesaplaması için gerekli değişkenler
         self.previous_error = 0
@@ -127,6 +132,9 @@ class MotorController:
         
         # Son zamanlama (dt için)
         self.last_time = time.time()
+        
+        # Şerit kaybı için sayaç
+        self.lost_lane_counter = 0
         
         logger.info("Motor kontrol modülü başlatıldı.")
     
@@ -248,11 +256,25 @@ class MotorController:
         # Zamanı hesapla
         current_time = time.time()
         dt = current_time - self.last_time
+        
+        # Zaman farkı çok küçükse minimum değer kullan
+        if dt < 0.01:
+            dt = 0.01
+            
         self.last_time = current_time
         
         # PID hesaplaması
+        # İntegral biriktirme (anti-windup ile)
         self.integral += error * dt
-        derivative = (error - self.previous_error) / dt if dt > 0 else 0
+        self.integral = max(-self.max_integral, min(self.integral, self.max_integral))
+        
+        # Türev hesaplama (keskin değişimleri önlemek için filtrelenmiş)
+        if dt > 0:
+            derivative = (error - self.previous_error) / dt
+            # Aşırı türev değerlerini filtrele
+            derivative = np.clip(derivative, -500, 500)
+        else:
+            derivative = 0
         
         # PID çıkışını hesapla
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
@@ -266,17 +288,19 @@ class MotorController:
         # Çıkışı sınırlandır
         output = max(min(output, base_speed), -base_speed)
         
-        # Sol ve sağ motor hızlarını hesapla
+        # Sol ve sağ motor hızlarını hesapla - geliştirilmiş algoritma
         if error > 0:  # Sağa kaymış, sola dönmeli
-            left_speed = base_speed - output
-            right_speed = base_speed
+            # Hata büyükse, sol motoru daha fazla azalt, sağ motoru biraz artır
+            left_speed = base_speed - (output * 1.2)  # Dönüş için daha fazla azalt
+            right_speed = min(base_speed + (output * 0.3), self.max_speed)  # Az miktarda artır
         else:  # Sola kaymış, sağa dönmeli
-            left_speed = base_speed
-            right_speed = base_speed + output
+            # Hata büyükse, sağ motoru daha fazla azalt, sol motoru biraz artır
+            left_speed = min(base_speed - (output * 0.3), self.max_speed)  # Az miktarda artır
+            right_speed = base_speed + (output * 1.2)  # Dönüş için daha fazla azalt
         
         # Hız değerlerini sınırla
-        left_speed = min(max(0, left_speed), self.max_speed)
-        right_speed = min(max(0, right_speed), self.max_speed)
+        left_speed = min(max(self.min_motor_speed, left_speed), self.max_speed)
+        right_speed = min(max(self.min_motor_speed, right_speed), self.max_speed)
         
         return left_speed, right_speed
     
@@ -289,29 +313,62 @@ class MotorController:
                              Pozitif değer sağa kayma, negatif değer sola kayma
         """
         if center_diff is None:
-            # Eğer şerit tespit edilemezse, ileri git
-            self.forward()
-            return
+            # Şerit tespit edilemedi - kayıp şerit sayacını artır
+            self.lost_lane_counter += 1
+            
+            # Kısa süreli kayıplarda son komutları koru
+            if self.lost_lane_counter < 5:
+                # Önceki hızlarla devam et
+                return
+            # Uzun süreli kayıplarda güvenli moda geç
+            elif self.lost_lane_counter < 20:
+                # Yavaşla ama durmadan devam et
+                self.forward(self.default_speed * 0.7)
+                logger.warning(f"Şerit kaybı: {self.lost_lane_counter} kare - yavaşlıyor")
+                return
+            else:
+                # Çok uzun süre şerit yoksa dur
+                logger.error("Şerit uzun süre bulunamadı - duruyor")
+                self.stop()
+                return
+        else:
+            # Şerit bulundu, sayacı sıfırla
+            self.lost_lane_counter = 0
         
         # Şerit merkezden kayma miktarının mutlak değeri
         abs_diff = abs(center_diff)
         
         # Eşik değeri (bu değerden az sapmalar için düzeltme yapma)
-        threshold = 10
+        threshold = 5  # Daha hassas düzeltmeler için düşürüldü
         
         if abs_diff < threshold:
-            # Sapma az ise düz git
-            self.forward()
+            # Sapma çok az ise düz git - tam hız
+            self.forward(self.default_speed)
         else:
             try:
                 # PID kontrolü ile motor hızlarını hesapla
                 left_speed, right_speed = self.pid_control(center_diff)
                 
-                # Motor hızlarını ayarla
-                self._set_motor_speed('left', 'forward', left_speed)
-                self._set_motor_speed('right', 'forward', right_speed)
+                # Şerit sapması çok büyükse keskin dönüş yap
+                if abs_diff > 150:  # Aşırı sapma durumu
+                    if center_diff > 0:
+                        # Çok sağa sapmış, keskin sola dön
+                        self.turn_left(self.default_speed * 1.1)
+                        logger.info(f"Keskin sol dönüş (sapma: {center_diff})")
+                    else:
+                        # Çok sola sapmış, keskin sağa dön
+                        self.turn_right(self.default_speed * 1.1)
+                        logger.info(f"Keskin sağ dönüş (sapma: {center_diff})")
+                else:
+                    # Normal sapma - PID ile hesaplanan hızları kullan
+                    self._set_motor_speed('left', 'forward', left_speed)
+                    self._set_motor_speed('right', 'forward', right_speed)
+                    
+                    if abs_diff > 50:
+                        logger.debug(f"Şerit takibi (büyük sapma): Sapma={center_diff}, Sol={left_speed:.2f}, Sağ={right_speed:.2f}")
+                    else:
+                        logger.debug(f"Şerit takibi (küçük sapma): Sapma={center_diff}, Sol={left_speed:.2f}, Sağ={right_speed:.2f}")
                 
-                logger.debug(f"Şerit takibi: Sapma={center_diff}, Sol={left_speed:.2f}, Sağ={right_speed:.2f}")
             except Exception as e:
                 logger.error(f"Şerit takibi hatası: {e}")
                 self.stop()
