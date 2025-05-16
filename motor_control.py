@@ -40,7 +40,7 @@ class MotorController:
                  max_speed=0.7,               # Maksimum hız değeri (0-1 arası) - azaltıldı
                  default_speed=0.35,          # Varsayılan hız - azaltıldı
                  use_board_pins=True,         # BOARD pin numaralandırmasını kullan
-                 pwm_frequency=50):          # PWM frekansı (Hz) - azaltıldı
+                 pwm_frequency=25):          # PWM frekansı (Hz) - daha da azaltıldı (50Hz->25Hz)
         """
         MotorController sınıfını başlatır.
         
@@ -52,7 +52,7 @@ class MotorController:
             max_speed (float): Maksimum hız seviyesi (0-1 arası)
             default_speed (float): Varsayılan hız seviyesi (0-1 arası)
             use_board_pins (bool): BOARD pin numaralandırmasını kullan (True) veya BCM kullan (False)
-            pwm_frequency (int): PWM frekansı (Hz)
+            pwm_frequency (int): PWM frekansı (Hz) - aşırı ısınmayı önlemek için düşürüldü
         """
         self.use_board_pins = use_board_pins
         self.max_speed = max_speed
@@ -115,10 +115,23 @@ class MotorController:
             self.cleanup()
             raise
         
-        # Optimize edilmiş PID kontrol parametreleri - daha yumuşak kontrol için değiştirildi
+        # Başlangıç PID kontrol parametreleri
         self.kp = 0.5   # Orantısal katsayı - azaltıldı, daha yumuşak tepki için
         self.ki = 0.02  # Integral katsayı - azaltıldı
         self.kd = 0.1   # Türev katsayı - azaltıldı, daha az salınım için
+        
+        # Adaptif PID sistemi için parametreler
+        self.enable_adaptive_pid = True  # Adaptif PID sistemini etkinleştir
+        self.performance_history = []    # Performans geçmişini tutacak liste
+        self.history_max_length = 50     # Maksimum geçmiş uzunluğu
+        self.error_history = []          # Hata geçmişi
+        self.pid_update_interval = 2.0   # PID güncelleme aralığı (saniye)
+        self.last_pid_update = time.time()
+        
+        # PID ayarlama limitleri
+        self.kp_min, self.kp_max = 0.3, 0.8
+        self.ki_min, self.ki_max = 0.01, 0.1
+        self.kd_min, self.kd_max = 0.05, 0.3
         
         # PID sınır değerleri
         self.max_integral = 50.0  # İntegral terimini daha fazla sınırla
@@ -126,10 +139,18 @@ class MotorController:
         # Hız limitleri
         self.min_motor_speed = 0.2  # Minimum motor hızı (durma noktasını önler)
         
-        # Hız değişim limiti - ani değişimleri önlemek için
-        self.max_speed_change = 0.1  # Bir adımda maksimum hız değişimi
-        self.prev_left_speed = self.default_speed
-        self.prev_right_speed = self.default_speed
+        # Geliştirilmiş ramping (hız yumuşatma) mekanizması
+        # Daha yavaş ve yumuşak hız değişimi
+        self.max_accel = 0.05     # Hızlanma sınırı (bir adımda maksimum artış) - azaltıldı
+        self.max_decel = 0.08     # Yavaşlama sınırı (bir adımda maksimum azalış) - nispeten daha hızlı
+        self.prev_left_speed = 0.0  # Başlangıçta durgun
+        self.prev_right_speed = 0.0 # Başlangıçta durgun
+        self.prev_left_direction = 'stop'  # Başlangıçta durgun
+        self.prev_right_direction = 'stop' # Başlangıçta durgun
+        
+        # Yön değişimi zamanlaması
+        self.direction_change_delay = 0.1  # Yön değiştirme sırasında kısa bir bekleme (sn)
+        self.last_direction_change = 0     # Son yön değişikliği zamanı
         
         # PID hesaplaması için gerekli değişkenler
         self.previous_error = 0
@@ -142,10 +163,113 @@ class MotorController:
         self.lost_lane_counter = 0
         
         logger.info("Motor kontrol modülü başlatıldı.")
+        logger.info(f"Adaptif PID: {self.enable_adaptive_pid}, Başlangıç PID: kp={self.kp}, ki={self.ki}, kd={self.kd}")
+    
+    def _update_pid_parameters(self):
+        """
+        Performans metriklerine göre PID parametrelerini dinamik olarak günceller.
+        Bu metod, aracın performansı kötüleştiğinde veya salınımlar arttığında 
+        PID parametrelerini otomatik olarak ayarlar.
+        """
+        if not self.enable_adaptive_pid or len(self.error_history) < 10:
+            return
+        
+        current_time = time.time()
+        if current_time - self.last_pid_update < self.pid_update_interval:
+            return
+        
+        self.last_pid_update = current_time
+        
+        # Son hataların analizi
+        recent_errors = np.array(self.error_history[-20:])
+        error_mean = np.mean(np.abs(recent_errors))
+        error_var = np.var(recent_errors)
+        error_trend = np.mean(np.diff(recent_errors[-10:]))
+        
+        old_kp, old_ki, old_kd = self.kp, self.ki, self.kd
+        
+        # Hata ortalaması yüksekse, kontrol yanıtını güçlendir
+        if error_mean > 0.5:
+            self.kp = min(self.kp * 1.05, self.kp_max)  # P terimini artır (daha agresif yanıt)
+            self.kd = min(self.kd * 1.05, self.kd_max)  # D terimini artır (salınımı kontrol etmek için)
+        else:
+            # Hata ortalaması düşükse, yanıtı yumuşat
+            self.kp = max(self.kp * 0.98, self.kp_min)  # P terimini azalt (daha yumuşak yanıt)
+        
+        # Varyans yüksekse (salınımlar), D terimini artır, P terimini azalt
+        if error_var > 0.3:
+            self.kp = max(self.kp * 0.95, self.kp_min)  # P terimini azalt
+            self.kd = min(self.kd * 1.1, self.kd_max)   # D terimini artır (daha iyi salınım kontrolü)
+        
+        # Trend (yön) negatifse, I terimini biraz artır
+        if error_trend < -0.05:
+            self.ki = min(self.ki * 1.05, self.ki_max)  # I terimini artır
+        elif error_trend > 0.05:
+            self.ki = max(self.ki * 0.95, self.ki_min)  # I terimini azalt
+        
+        # Parametreler değiştiyse log
+        if old_kp != self.kp or old_ki != self.ki or old_kd != self.kd:
+            logger.info(f"Adaptif PID parametreleri güncellendi: kp={self.kp:.3f} (eski: {old_kp:.3f}), "
+                      f"ki={self.ki:.3f} (eski: {old_ki:.3f}), kd={self.kd:.3f} (eski: {old_kd:.3f})")
+            logger.debug(f"PID güncelleme metrikleri: hata_ort={error_mean:.3f}, varyans={error_var:.3f}, trend={error_trend:.3f}")
+            
+    def calculate_pid(self, error):
+        """
+        PID kontrolü hesaplar. Hata değerine göre motorlara uygulanacak hız düzeltmesini döndürür.
+        
+        Args:
+            error (float): Orta çizgiden sapma hatası (negatif: sola sapma, pozitif: sağa sapma)
+        
+        Returns:
+            float: PID çıkışı (motor hız düzeltme değeri)
+        """
+        # Hata geçmişini güncelle
+        self.error_history.append(error)
+        if len(self.error_history) > self.history_max_length:
+            self.error_history.pop(0)
+            
+        # PID parametrelerini gerekirse güncelle
+        self._update_pid_parameters()
+        
+        # Zaman farkını hesapla
+        current_time = time.time()
+        dt = current_time - self.last_time
+        self.last_time = current_time
+        
+        # dt sıfırsa veya çok küçükse
+        if dt < 0.001:
+            dt = 0.001
+            
+        # Deadband - çok küçük hatalar için düzeltme yapma
+        if abs(error) < 0.05:
+            return 0
+        
+        # PID bileşenlerini hesapla
+        # Orantısal terim
+        p_term = self.kp * error
+        
+        # İntegral terimi
+        self.integral += error * dt
+        # İntegral terimini sınırla (anti-windup)
+        self.integral = max(-self.max_integral, min(self.integral, self.max_integral))
+        i_term = self.ki * self.integral
+        
+        # Türev terimi
+        derivative = (error - self.previous_error) / dt
+        d_term = self.kd * derivative
+        
+        # Toplam PID çıkışı
+        output = p_term + i_term + d_term
+        
+        # Bir sonraki hesaplama için hatayı kaydet
+        self.previous_error = error
+        
+        return output
     
     def _set_motor_speed(self, motor_side, direction, speed):
         """
         Belirtilen motoru belirtilen yön ve hızda çalıştırır.
+        Geliştirilmiş ramping ile ani değişimleri yumuşatır.
         
         Args:
             motor_side (str): 'left' veya 'right'
@@ -155,41 +279,75 @@ class MotorController:
         # Hız değerini sınırlandır
         speed = min(max(0, speed), self.max_speed)
         
-        # Ani hız değişimlerini sınırla
+        # Motor tarafına göre önceki değerleri al
         if motor_side == 'left':
-            # Önceki hızla karşılaştır ve değişimi sınırla
-            max_new_speed = self.prev_left_speed + self.max_speed_change
-            min_new_speed = self.prev_left_speed - self.max_speed_change
-            speed = min(max(speed, min_new_speed), max_new_speed)
-            self.prev_left_speed = speed
-            
+            prev_speed = self.prev_left_speed
+            prev_direction = self.prev_left_direction
             motor_in1 = self.left_motor_in1
             motor_in2 = self.left_motor_in2
             motor_pwm = self.left_pwm
         else:  # 'right'
-            # Önceki hızla karşılaştır ve değişimi sınırla
-            max_new_speed = self.prev_right_speed + self.max_speed_change
-            min_new_speed = self.prev_right_speed - self.max_speed_change
-            speed = min(max(speed, min_new_speed), max_new_speed)
-            self.prev_right_speed = speed
-            
+            prev_speed = self.prev_right_speed
+            prev_direction = self.prev_right_direction
             motor_in1 = self.right_motor_in1
             motor_in2 = self.right_motor_in2
             motor_pwm = self.right_pwm
         
-        # Yön kontrolü
+        # Yön değişimi tespiti
+        direction_changed = prev_direction != direction and prev_direction != 'stop' and direction != 'stop'
+        
+        # Yön değişimlerinde ani geçişleri önle
+        if direction_changed:
+            current_time = time.time()
+            # İlk önce motoru durdur
+            motor_in1.off()
+            motor_in2.off()
+            motor_pwm.value = 0
+            
+            # Motorun elektromekanik olarak durması için kısa bir bekleme
+            elapsed = current_time - self.last_direction_change
+            if elapsed < self.direction_change_delay:
+                time.sleep(self.direction_change_delay - elapsed)
+            
+            self.last_direction_change = time.time()
+        
+        # Ramping mekanizması - hedef hıza kademeli olarak geçiş
+        target_speed = speed
+        
+        # Hız artıyor mu, azalıyor mu?
+        if target_speed > prev_speed:
+            # Hızlanma durumu - daha yavaş geçiş
+            ramped_speed = min(target_speed, prev_speed + self.max_accel)
+        else:
+            # Yavaşlama durumu - daha hızlı geçiş
+            ramped_speed = max(target_speed, prev_speed - self.max_decel)
+        
+        # Yönü ve ramping uygulanmış hızı ayarla
         if direction == 'forward':
             motor_in1.on()
             motor_in2.off()
-            motor_pwm.value = speed
+            motor_pwm.value = ramped_speed
         elif direction == 'backward':
             motor_in1.off()
             motor_in2.on()
-            motor_pwm.value = speed
+            motor_pwm.value = ramped_speed
         else:  # 'stop'
             motor_in1.off()
             motor_in2.off()
             motor_pwm.value = 0
+            ramped_speed = 0  # Duruş durumunda hız sıfır
+        
+        # Önceki değerleri güncelle
+        if motor_side == 'left':
+            self.prev_left_speed = ramped_speed
+            self.prev_left_direction = direction
+        else:  # 'right'
+            self.prev_right_speed = ramped_speed
+            self.prev_right_direction = direction
+        
+        # Debug log
+        if ramped_speed != speed:
+            logger.debug(f"{motor_side.capitalize()} motor ramping: {prev_speed:.2f} -> {ramped_speed:.2f} (hedef: {speed:.2f})")
     
     def forward(self, speed=None):
         """
@@ -260,61 +418,6 @@ class MotorController:
         
         logger.debug("Araç durduruldu.")
     
-    def pid_control(self, error, dt=None):
-        """
-        PID kontrol algoritması ile hata değerine göre düzeltme hesaplar.
-        
-        Args:
-            error (float): Şerit merkezinden sapma hatası (-1 ile 1 arasında)
-            dt (float, optional): Zaman farkı. None ise otomatik hesaplanır.
-            
-        Returns:
-            float: Düzeltme değeri (PID kontrolü çıktısı)
-        """
-        # Zaman farkını hesapla
-        current_time = time.time()
-        if dt is None:
-            dt = current_time - self.last_time
-            dt = max(0.001, min(dt, 0.1))  # dt değerini sınırla (çok büyük veya çok küçük olmasın)
-        self.last_time = current_time
-        
-        # Deadband (ölü bölge) uygulaması - çok küçük hatalar için tepki verme
-        deadband = 0.05  # %5'lik bir ölü bölge
-        if abs(error) < deadband:
-            error = 0
-            self.integral = 0  # Ölü bölgedeyken integrali sıfırla
-        
-        # PID bileşenlerini hesapla
-        proportional = error
-        
-        # İntegral hesabı - dt ile doğru entegrasyon
-        self.integral += error * dt
-        
-        # İntegral sınırlaması (anti-windup) - değiştirildi (daha küçük sınır)
-        self.integral = max(-self.max_integral, min(self.integral, self.max_integral))
-        
-        # Türev hesabı - daha doğru (zamana göre değişim)
-        if dt > 0:
-            derivative = (error - self.previous_error) / dt
-            # Türev filtreleme (ani değişimleri yumuşat)
-            derivative = max(-1.0, min(derivative, 1.0))
-        else:
-            derivative = 0
-            
-        # PID çıktısını hesapla
-        output = (self.kp * proportional) + (self.ki * self.integral) + (self.kd * derivative)
-        
-        # Çıktıyı sınırlandır
-        output = max(-1.0, min(output, 1.0))
-        
-        # Önceki hatayı güncelle
-        self.previous_error = error
-        
-        # Debugging
-        logger.debug(f"PID - Hata: {error:.4f}, P: {proportional:.4f}, I: {self.integral:.4f}, D: {derivative:.4f}, Çıktı: {output:.4f}")
-        
-        return output
-
     def follow_lane(self, center_diff, speed=None):
         """
         Şerit takibi için araç kontrolü.
@@ -349,7 +452,7 @@ class MotorController:
             self.lost_lane_counter = 0
             
         # PID kontrol çıktısını hesapla
-        correction = self.pid_control(center_diff)
+        correction = self.calculate_pid(center_diff)
         
         # Daha yumuşak dönüşler için düzeltme faktörünü azalt (aşırı ısınmayı azaltır)
         steering_factor = 0.3  # Daha önceki 0.5 değerinden daha düşük
