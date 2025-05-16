@@ -18,7 +18,7 @@ from datetime import datetime
 
 # Özel modüller
 try:
-    from lane_detection import LaneDetection
+    from lane_detection import LaneDetector
 except ImportError:
     print("HATA: lane_detection modülü bulunamadı!")
     print("Bu programı otonom araç projesinin ana dizininde çalıştırın.")
@@ -64,9 +64,13 @@ class CameraTest:
         
         # Lane Detection modülünü başlat
         try:
-            self.lane_detector = LaneDetection(width=self.width, height=self.height, 
-                                             calibration_file=self.calibration_file,
+            self.lane_detector = LaneDetector(camera_resolution=(self.width, self.height), 
                                              debug=self.debug)
+            
+            # Kalibrasyon dosyasını yükle (varsa)
+            if os.path.exists(self.calibration_file):
+                self.lane_detector.load_calibration(self.calibration_file)
+                
             logger.info("Şerit tespit modülü başlatıldı")
         except Exception as e:
             logger.error(f"Şerit tespit modülü başlatılırken hata: {e}")
@@ -205,7 +209,7 @@ class CameraTest:
                     start_time = time.time()
                     
                     # Şerit tespiti yap
-                    processed_frame, lane_info = self.lane_detector.process_frame(frame)
+                    processed_frame, center_diff = self.lane_detector.process_frame(frame)
                     
                     # İşleme süresini hesapla
                     processing_time = (time.time() - start_time) * 1000  # ms cinsinden
@@ -214,7 +218,7 @@ class CameraTest:
                         self.processing_times.pop(0)
                     
                     # Sapma istatistiklerini güncelle
-                    deviation = lane_info.get("deviation", None)
+                    deviation = center_diff
                     if deviation is not None:
                         total_deviation += abs(deviation)
                         max_deviation = max(max_deviation, abs(deviation))

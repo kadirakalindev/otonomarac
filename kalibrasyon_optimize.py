@@ -29,17 +29,21 @@ class KameraPerspektifAyarlayici:
     """
     Kamera perspektif dönüşümü için optimize edilmiş kalibrasyon aracı
     """
-    def __init__(self, camera_resolution=(320, 240), framerate=15):
+    def __init__(self, camera_resolution=(320, 240), framerate=15, camera_id=0, output_file="calibration.json"):
         """
         KameraPerspektifAyarlayici sınıfını başlatır.
         
         Args:
             camera_resolution (tuple): Kamera çözünürlüğü (genişlik, yükseklik)
             framerate (int): Kare hızı (fps)
+            camera_id (int): Kamera ID numarası
+            output_file (str): Kalibrasyon dosyası çıktı yolu
         """
         self.width = camera_resolution[0]
         self.height = camera_resolution[1]
         self.framerate = framerate
+        self.camera_id = camera_id
+        self.output_file = output_file
         self.running = True
         
         # Varsayılan perspektif noktaları
@@ -92,8 +96,8 @@ class KameraPerspektifAyarlayici:
         Kamerayı başlatır ve yapılandırır
         """
         try:
-            logger.info("Kamera başlatılıyor...")
-            self.camera = Picamera2()
+            logger.info(f"Kamera başlatılıyor (ID: {self.camera_id})...")
+            self.camera = Picamera2(self.camera_id)
             
             # Kamera yapılandırması - düşük çözünürlük ve kare hızı
             camera_config = self.camera.create_preview_configuration(
@@ -298,13 +302,16 @@ class KameraPerspektifAyarlayici:
             logger.error(f"Kalibrasyon çalıştırma hatası: {e}")
             self.cleanup()
     
-    def save_calibration(self, filename="calibration.json"):
+    def save_calibration(self, filename=None):
         """
         Kalibrasyon değerlerini JSON dosyasına kaydeder
         
         Args:
             filename (str): Kalibrasyon dosyası adı
         """
+        if filename is None:
+            filename = self.output_file
+            
         calibration_data = {
             "src_points": self.src_points.tolist(),
             "dst_points": self.dst_points.tolist(),
@@ -317,6 +324,7 @@ class KameraPerspektifAyarlayici:
         try:
             with open(filename, 'w') as f:
                 json.dump(calibration_data, f, indent=4)
+            logger.info(f"Kalibrasyon dosyası kaydedildi: {filename}")
             return True
         except Exception as e:
             logger.error(f"Kalibrasyon kaydetme hatası: {e}")
@@ -362,6 +370,8 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description='Otonom Araç Kalibrasyon Aracı (Optimize)')
     parser.add_argument('--resolution', default='320x240', help='Kamera çözünürlüğü (GENxYÜK)')
     parser.add_argument('--fps', type=int, default=10, help='Kare hızı (daha düşük = daha az CPU kullanımı)')
+    parser.add_argument('--camera', type=int, default=0, help='Kamera ID numarası')
+    parser.add_argument('--output', default='calibration.json', help='Kalibrasyon dosyası çıktı yolu')
     
     return parser.parse_args()
 
@@ -392,7 +402,12 @@ def main():
     print("\nBaşlatılıyor...\n")
     
     # Kamera perspektif ayarlayıcıyı başlat
-    calibrator = KameraPerspektifAyarlayici(camera_resolution=resolution, framerate=args.fps)
+    calibrator = KameraPerspektifAyarlayici(
+        camera_resolution=resolution, 
+        framerate=args.fps, 
+        camera_id=args.camera,
+        output_file=args.output
+    )
     
     # Aracı çalıştır
     calibrator.run()
