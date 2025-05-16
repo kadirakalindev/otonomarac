@@ -5,6 +5,7 @@
 Otonom Araç - Video Test Programı
 Bu program, mevcut şerit tespit algoritmasını örnek video üzerinde test eder.
 Video kareleri işlenirken sonuçları gerçek zamanlı olarak gösterir.
+Optimize edilmiş performans ve bellek kullanımı.
 """
 
 import cv2
@@ -13,6 +14,7 @@ import argparse
 import time
 import os
 import logging
+import gc
 from lane_detection import LaneDetector
 
 # Log yapılandırması
@@ -22,7 +24,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("VideoTest")
 
-def process_video(video_path, output_path=None, resolution=(320, 240), play_speed=1.0, save_output=False):
+def process_video(video_path, output_path=None, resolution=(320, 240), play_speed=1.0, 
+                 save_output=False, performance_mode="balanced"):
     """
     Video dosyasını işler ve şerit tespiti uygular
     
@@ -32,6 +35,7 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
         resolution (tuple): İşleme çözünürlüğü (genişlik, yükseklik)
         play_speed (float): Oynatma hızı (1.0 = normal hız)
         save_output (bool): İşlenmiş videoyu kaydet
+        performance_mode (str): Performans modu (speed, balanced, quality)
     """
     # Video dosyasını aç
     cap = cv2.VideoCapture(video_path)
@@ -49,6 +53,14 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
     logger.info(f"Video yüklendi: {video_path}")
     logger.info(f"Orijinal çözünürlük: {original_width}x{original_height}, FPS: {fps}, Toplam kare: {total_frames}")
     
+    # Performans moduna göre gerçek işleme çözünürlüğünü belirle
+    processing_resolution = get_processing_resolution(resolution, performance_mode)
+    logger.info(f"İşleme çözünürlüğü: {processing_resolution[0]}x{processing_resolution[1]} (Mod: {performance_mode})")
+    
+    # Bellek önbellek tamponları - daha iyi performans için
+    resize_buffer = np.zeros((processing_resolution[1], processing_resolution[0], 3), dtype=np.uint8)
+    output_buffer = np.zeros((resolution[1], resolution[0]*2, 3), dtype=np.uint8)
+    
     # Video yazıcı (eğer kaydetme seçeneği seçildiyse)
     out = None
     if save_output and output_path:
@@ -62,7 +74,7 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
         logger.info(f"Video kaydı başlatıldı: {output_path}")
     
     # Şerit dedektörünü başlat
-    lane_detector = LaneDetector(camera_resolution=resolution, debug=True)
+    lane_detector = LaneDetector(camera_resolution=processing_resolution, debug=True)
     
     # İşlem süresi ölçümü
     start_time = time.time()
@@ -77,6 +89,11 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
     lost_lane_frames = 0
     total_frames_processed = 0
     
+    # Kare atlama modunu etkinleştir
+    enable_frame_skipping = performance_mode == "speed"
+    frame_skip_threshold = 60  # 60ms'den uzun işleme süresi için kare atla
+    frame_skip_counter = 0
+    
     # Çerçeve işleme döngüsü
     while cap.isOpened():
         if not paused:
@@ -86,13 +103,23 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
                 logger.info("Video dosyasının sonuna ulaşıldı veya kare okunamadı.")
                 break
             
-            # Kareyi yeniden boyutlandır
-            frame = cv2.resize(frame, resolution)
+            # Kare atlama modunu uygula
+            if enable_frame_skipping and frame_skip_counter > 0:
+                frame_skip_counter -= 1
+                continue
+            
+            # Kareyi yeniden boyutlandır (önceden ayrılmış tamponu kullan)
+            resized = cv2.resize(frame, resolution, dst=resize_buffer)
             
             # Şerit tespiti uygula ve zamanlama ölç
             process_start = time.time()
-            processed_frame, center_diff = lane_detector.process_frame(frame)
+            processed_frame, center_diff = lane_detector.process_frame(resized)
             process_time = (time.time() - process_start) * 1000  # milisaniye
+            
+            # Performans moduna göre kare atlama
+            if enable_frame_skipping and process_time > frame_skip_threshold:
+                frame_skip_counter = max(1, int(process_time / 16.0))  # 60 fps için
+                logger.debug(f"İşlem süresi {process_time:.1f}ms - {frame_skip_counter} kare atlanacak")
             
             # Performans metriklerini kaydet
             processing_times.append(process_time)
@@ -104,7 +131,7 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
             total_frames_processed += 1
             
             # Performans istatistiklerini hesapla
-            avg_process_time = sum(processing_times) / len(processing_times)
+            avg_process_time = sum(processing_times) / len(processing_times) if processing_times else 0
             if center_diff_values:
                 avg_center_diff = sum(center_diff_values) / len(center_diff_values)
                 max_center_diff = max(center_diff_values)
@@ -116,7 +143,6 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
             
             # Boyut kontrolü - işlenmiş frame ile orijinal frame'in boyutları farklı olabilir
             if processed_frame.shape[0] != resolution[1] or processed_frame.shape[1] != resolution[0]:
-                logger.info(f"İşlenmiş görüntü boyutu({processed_frame.shape[1]}x{processed_frame.shape[0]}) orijinalden farklı. Yeniden boyutlandırılıyor.")
                 processed_frame = cv2.resize(processed_frame, resolution)
             
             # İşlem bilgilerini ekle
@@ -132,9 +158,10 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
             cv2.putText(frame, f"Ort. Sapma: {avg_center_diff:.1f}px", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
             # Debug görüntüsü ile birlikte orijinal görüntüyü birleştir
-            combined_view = np.zeros((resolution[1], resolution[0]*2, 3), dtype=np.uint8)
-            combined_view[:, :resolution[0]] = frame
-            combined_view[:, resolution[0]:] = processed_frame
+            # Önceden ayrılmış tamponu kullan
+            output_buffer[:, :resolution[0]] = frame
+            output_buffer[:, resolution[0]:] = processed_frame
+            combined_view = output_buffer
             
             # Görselleştirme için açıklama ekle
             cv2.putText(combined_view, "Orijinal Görüntü", (10, resolution[1]-10), 
@@ -152,6 +179,10 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
                 out.write(combined_view)
                 
             frame_count += 1
+            
+            # Bellek kullanımını periyodik olarak temizle
+            if frame_count % 100 == 0:
+                gc.collect()
         
         # Görüntüyü göster
         cv2.imshow("Şerit Tespiti Test", combined_view)
@@ -206,11 +237,41 @@ def process_video(video_path, output_path=None, resolution=(320, 240), play_spee
         out.release()
     cv2.destroyAllWindows()
     
+    # Tamponu temizle
+    resize_buffer = None
+    output_buffer = None
+    gc.collect()
+    
     # İşlem istatistikleri
     elapsed_time = time.time() - start_time
     logger.info(f"Video işleme tamamlandı. Toplam süre: {elapsed_time:.1f}s | İşlenen kare: {frame_count}")
     
     return True
+
+def get_processing_resolution(base_resolution, performance_mode):
+    """
+    Performans moduna göre işleme çözünürlüğünü belirler
+    
+    Args:
+        base_resolution (tuple): Temel çözünürlük (genişlik, yükseklik)
+        performance_mode (str): Performans modu ('speed', 'balanced', 'quality')
+        
+    Returns:
+        tuple: İşleme çözünürlüğü (genişlik, yükseklik)
+    """
+    width, height = base_resolution
+    
+    if performance_mode == "speed":
+        # Hız odaklı: Düşük çözünürlük
+        return (width // 2, height // 2)
+    
+    elif performance_mode == "quality":
+        # Kalite odaklı: Yüksek çözünürlük
+        return base_resolution
+    
+    else:  # "balanced" veya diğer değerler
+        # Dengeli mod: Orta çözünürlük
+        return (width * 3 // 4, height * 3 // 4)
 
 def parse_arguments():
     """
@@ -222,6 +283,8 @@ def parse_arguments():
     parser.add_argument('--resolution', default='320x240', help='İşleme çözünürlüğü (GENxYÜK)')
     parser.add_argument('--speed', type=float, default=1.0, help='Oynatma hızı (1.0 = normal hız)')
     parser.add_argument('--save', action='store_true', help='İşlenmiş videoyu kaydet')
+    parser.add_argument('--performance', default='balanced', choices=['speed', 'balanced', 'quality'],
+                       help='Performans modu: hız/kalite dengesi')
     
     return parser.parse_args()
 
@@ -251,7 +314,8 @@ def main():
         output_path=args.output,
         resolution=resolution,
         play_speed=args.speed,
-        save_output=args.save
+        save_output=args.save,
+        performance_mode=args.performance
     )
     
     print("\nVideo İşleme Tamamlandı!")
@@ -259,6 +323,8 @@ def main():
     print("  ESC: Çıkış")
     print("  SPACE: Duraklat/Devam Et")
     print("  S: Anlık Görüntü Kaydet")
+    print("  > / .: Hızlandır")
+    print("  < / ,: Yavaşlat")
 
 if __name__ == "__main__":
     main() 
