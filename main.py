@@ -13,8 +13,6 @@ import sys
 import logging
 import argparse
 import os
-import gc
-import numpy as np
 from picamera2 import Picamera2
 from lane_detection import LaneDetector
 from motor_control import MotorController
@@ -40,8 +38,7 @@ class OtonomArac:
                  left_pwm_pin=12,             # Sol motor Enable pini
                  right_pwm_pin=32,            # Sağ motor Enable pini
                  use_board_pins=True,         # BOARD pin numaralandırması kullan
-                 calibration_file="calibration.json",  # Kalibrasyon dosyası yolu
-                 performance_mode="balanced"):  # Performans modu: "speed", "balanced" veya "quality"
+                 calibration_file="calibration.json"):  # Kalibrasyon dosyası yolu
         """
         OtonomArac sınıfını başlatır.
         
@@ -56,7 +53,6 @@ class OtonomArac:
             right_pwm_pin (int): Sağ motor Enable pini
             use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
             calibration_file (str): Kalibrasyon dosyası yolu
-            performance_mode (str): Performans modu - hız/kalite dengesi
         """
         self.debug = debug
         self.debug_fps = debug_fps
@@ -65,32 +61,15 @@ class OtonomArac:
         self.framerate = framerate
         self.camera = None  # Başlangıçta None olarak tanımla
         self.calibration_file = calibration_file  # Kalibrasyon dosyası yolunu sakla
-        self.performance_mode = performance_mode  # Performans modunu sakla
-        
-        # Performans izleme
-        self.fps = 0
-        self.frame_count = 0
-        self.fps_start_time = 0
-        self.processing_times = []
-        self.max_process_time = 0
-        self.skipped_frames = 0
-        
-        # Bellek yönetimi - önceden ayrılan tamponlar
-        self.frame_buffer = None  # Kamera karesi tamponu
-        self.resize_buffer = None  # Yeniden boyutlandırma tamponu
         
         # Modülleri başlatma denemesi - hata durumunda güvenli kapatma
         try:
             # Kamera başlatma - güvenli başlatma için try-except kullan
             self._initialize_camera()
             
-            # Şerit tespit modülünü başlat - performans moduna göre
-            logger.info(f"Şerit tespit modülü başlatılıyor (mod: {performance_mode})...")
-            
-            # Performans moduna göre çözünürlük seçimi
-            lane_detection_resolution = self._get_lane_detection_resolution()
-            
-            self.lane_detector = LaneDetector(camera_resolution=lane_detection_resolution, debug=debug)
+            # Şerit tespit modülünü başlat
+            logger.info("Şerit tespit modülü başlatılıyor...")
+            self.lane_detector = LaneDetector(camera_resolution=camera_resolution, debug=debug)
             
             # Kalibrasyon dosyasını yükle (varsa)
             if os.path.exists(self.calibration_file):
@@ -107,10 +86,10 @@ class OtonomArac:
                 right_motor_pins=right_motor_pins,
                 left_pwm_pin=left_pwm_pin,
                 right_pwm_pin=right_pwm_pin,
-                max_speed=0.7,
-                default_speed=0.35,
+                max_speed=0.7,  # Daha düşük maksimum hız (aşırı ısınmayı önlemek için)
+                default_speed=0.35,  # Daha düşük varsayılan hız (aşırı ısınmayı önlemek için)
                 use_board_pins=use_board_pins,
-                pwm_frequency=25  # PWM frekansını düşürdük - aşırı ısınmayı azaltmak için
+                pwm_frequency=50  # PWM frekansını düşürdük - aşırı ısınmayı azaltmak için
             )
         
         except Exception as e:
@@ -123,31 +102,12 @@ class OtonomArac:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
-        # RAM kullanımını optimize et
-        gc.collect()
+        # FPS ölçümü için değişkenler
+        self.fps = 0
+        self.frame_count = 0
+        self.fps_start_time = 0
         
         logger.info("Otonom araç başlatıldı.")
-    
-    def _get_lane_detection_resolution(self):
-        """
-        Performans moduna göre şerit tespiti için çözünürlük belirler
-        
-        Returns:
-            tuple: Şerit tespiti için çözünürlük (genişlik, yükseklik)
-        """
-        width, height = self.camera_resolution
-        
-        if self.performance_mode == "speed":
-            # Hız odaklı: Düşük çözünürlük
-            return (width // 2, height // 2)
-        
-        elif self.performance_mode == "quality":
-            # Kalite odaklı: Yüksek çözünürlük
-            return self.camera_resolution
-        
-        else:  # "balanced" veya diğer değerler
-            # Dengeli mod: Orta çözünürlük
-            return (width * 3 // 4, height * 3 // 4)
     
     def _initialize_camera(self):
         """
@@ -175,29 +135,10 @@ class OtonomArac:
             }
             self.camera.set_controls(controls)
             
-            # Tamponları önceden oluştur
-            self._allocate_buffers()
-            
             logger.info("Kamera yapılandırması tamamlandı.")
         except Exception as e:
             logger.error(f"Kamera başlatma hatası: {e}")
             raise
-    
-    def _allocate_buffers(self):
-        """
-        Performansı artırmak için görüntü tamponlarını önceden oluşturur
-        """
-        # Kamera çözünürlüğünde boş bir görüntü tamponu
-        self.frame_buffer = np.zeros((self.camera_resolution[1], self.camera_resolution[0], 3), 
-                                    dtype=np.uint8)
-        
-        # Şerit tespiti çözünürlüğünde boş bir görüntü tamponu
-        lane_detection_resolution = self._get_lane_detection_resolution()
-        self.resize_buffer = np.zeros((lane_detection_resolution[1], lane_detection_resolution[0], 3), 
-                                     dtype=np.uint8)
-        
-        logger.debug(f"Görüntü tamponları ayrıldı - Kamera: {self.frame_buffer.shape}, "
-                   f"Şerit Tespiti: {self.resize_buffer.shape}")
     
     def signal_handler(self, sig, frame):
         """
@@ -206,73 +147,6 @@ class OtonomArac:
         logger.info("Kapatma sinyali alındı, temizleniyor...")
         self.cleanup()
         sys.exit(0)
-    
-    def _process_frame(self, frame):
-        """
-        Bir kareyi işler ve sonuçları döndürür.
-        Optimizasyonlar içerir.
-        
-        Args:
-            frame (numpy.ndarray): İşlenecek kare
-            
-        Returns:
-            tuple: (İşlenmiş kare, merkez sapması, işlem süresi)
-        """
-        start_time = time.time()
-        
-        # Performans moduna göre görüntüyü yeniden boyutlandır
-        lane_detection_resolution = self._get_lane_detection_resolution()
-        
-        # Eğer görüntü zaten doğru boyutta değilse
-        if frame.shape[1] != lane_detection_resolution[0] or frame.shape[0] != lane_detection_resolution[1]:
-            # Önceden ayrılmış tamponu kullan (yeni bellek ayırmayı önler)
-            resized = cv2.resize(frame, lane_detection_resolution, dst=self.resize_buffer)
-        else:
-            resized = frame
-            
-        # Görüntüyü işle ve merkezi hesapla
-        processed_frame, center_diff = self.lane_detector.process_frame(resized)
-        
-        # İşlem süresini hesapla
-        process_time = (time.time() - start_time) * 1000  # milisaniye
-        
-        # İşlem istatistiklerini güncelle
-        self.processing_times.append(process_time)
-        if len(self.processing_times) > 30:  # Son 30 kareyi tut
-            self.processing_times.pop(0)
-        
-        # Maksimum işlem süresini güncelle
-        if process_time > self.max_process_time:
-            self.max_process_time = process_time
-        
-        # Debug modunda görüntüye istatistikler ekle
-        if self.debug:
-            avg_time = sum(self.processing_times) / len(self.processing_times)
-            
-            # Görüntüye metin ekle
-            text_color = (0, 255, 0)  # Yeşil
-            cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", (10, 30), 
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
-            cv2.putText(processed_frame, f"İşlem: {process_time:.1f}ms (Ort: {avg_time:.1f}ms)", 
-                      (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
-            
-            if self.skipped_frames > 0:
-                cv2.putText(processed_frame, f"Atlanan: {self.skipped_frames}", (10, 90), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            
-            if center_diff is not None:
-                # Merkez farkına göre renk değiştirme
-                if abs(center_diff) < 20:
-                    color = (0, 255, 0)  # İyi: yeşil
-                elif abs(center_diff) < 50:
-                    color = (0, 255, 255)  # Orta: sarı
-                else:
-                    color = (0, 0, 255)  # Kötü: kırmızı
-                
-                cv2.putText(processed_frame, f"Merkez Farkı: {center_diff}", (10, 120), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
-        return processed_frame, center_diff, process_time
     
     def start(self):
         """
@@ -309,7 +183,6 @@ class OtonomArac:
             # FPS hesaplama değişkenlerini başlat
             self.fps_start_time = time.time()
             self.frame_count = 0
-            self.skipped_frames = 0
             
             # Debug modu için pencere oluştur
             if self.debug:
@@ -324,42 +197,17 @@ class OtonomArac:
             error_count = 0
             max_errors = 10  # Maksimum kabul edilebilir ardışık hata sayısı
             
-            # Kare atlama kontrolü için değişkenler
-            frame_skip_threshold = 100  # Bu milisaniyeden uzun sürerse kare atlama düşün
-            skip_frame_count = 0  # Art arda kaç kare atlanacak
-            
             # Ana döngü
             while self.running:
                 try:
                     # Kameradan görüntü al
-                    frame = self.camera.capture_array(buffer=self.frame_buffer)
+                    frame = self.camera.capture_array()
                     
-                    # Kare atlamayı yönet - performans optimizasyonu için
-                    should_process = True
+                    # Görüntüyü işle ve şeritleri tespit et
+                    processed_frame, center_diff = self.lane_detector.process_frame(frame)
                     
-                    # Önceki işlem süresi çok uzunsa kare atla
-                    if len(self.processing_times) > 0:
-                        last_process_time = self.processing_times[-1]
-                        if last_process_time > frame_skip_threshold:
-                            skip_frame_count = max(1, int(last_process_time / 33.3))  # 30 fps için
-                            
-                            if skip_frame_count > 0:
-                                should_process = (self.frame_count % skip_frame_count == 0)
-                                if not should_process:
-                                    self.skipped_frames += 1
-                    
-                    # Kare işle ve motoru kontrol et
-                    if should_process:
-                        # Görüntüyü işle ve şeritleri tespit et
-                        processed_frame, center_diff, process_time = self._process_frame(frame)
-                        
-                        # Şeritlere göre motoru kontrol et
-                        self.motor_controller.follow_lane(center_diff)
-                    else:
-                        # İşlemeden sadece görüntü göster (debug modunda)
-                        processed_frame = frame
-                        center_diff = None
-                        process_time = 0
+                    # Şeritlere göre motoru kontrol et
+                    self.motor_controller.follow_lane(center_diff)
                     
                     # Hata sayacını sıfırla (başarıyla işlendi)
                     error_count = 0
@@ -371,11 +219,7 @@ class OtonomArac:
                         self.fps = self.frame_count / elapsed_time
                         self.fps_start_time = time.time()
                         self.frame_count = 0
-                        logger.debug(f"FPS: {self.fps:.1f}, Ortalama İşlem Süresi: {sum(self.processing_times) / len(self.processing_times):.1f}ms")
-                        
-                        # Her saniyede bir bellek temizliği
-                        if self.frame_count % 30 == 0:
-                            gc.collect()
+                        logger.debug(f"FPS: {self.fps:.1f}")
                     
                     # Debug modunda görüntüyü göster (fps sınırlandırması ile)
                     if self.debug:
@@ -460,11 +304,6 @@ class OtonomArac:
         if self.debug:
             cv2.destroyAllWindows()
         
-        # Belleği temizle
-        self.frame_buffer = None
-        self.resize_buffer = None
-        gc.collect()
-        
         logger.info("Temizleme tamamlandı.")
 
 def parse_arguments():
@@ -484,12 +323,8 @@ def parse_arguments():
     parser.add_argument('--right-pwm', type=int, default=32, help='Sağ motor Enable pini')
     parser.add_argument('--use-bcm', action='store_true', help='BCM pin numaralandırması kullan (varsayılan: BOARD)')
     
-    # Kalibrasyon dosyası için argüman
+    # Kalibrasyon dosyası için argüman ekle
     parser.add_argument('--calibration', default='calibration.json', help='Kalibrasyon dosyası yolu')
-    
-    # Performans modu için argüman
-    parser.add_argument('--performance', default='balanced', choices=['speed', 'balanced', 'quality'],
-                       help='Performans modu: hız/kalite dengesi')
     
     return parser.parse_args()
 
@@ -511,8 +346,6 @@ def main():
     # Otonom aracı başlat
     try:
         logger.info("Otonom araç başlatılıyor...")
-        logger.info(f"Performans modu: {args.performance}")
-        
         otonom_arac = OtonomArac(
             camera_resolution=resolution,
             framerate=args.fps,
@@ -523,8 +356,7 @@ def main():
             left_pwm_pin=args.left_pwm,
             right_pwm_pin=args.right_pwm,
             use_board_pins=not args.use_bcm,
-            calibration_file=args.calibration,
-            performance_mode=args.performance
+            calibration_file=args.calibration
         )
         
         # Otonom sürüşü başlat

@@ -60,55 +60,43 @@ class LaneDetector:
         self.canny_low_threshold = 50
         self.canny_high_threshold = 150
         
-        # Hough dönüşümü parametreleri - Optimize edildi
+        # Hough dönüşümü parametreleri - U dönüşleri ve virajlar için optimize edildi
         self.rho = 1
         self.theta = np.pi/180
-        self.hough_threshold = 15
-        self.min_line_length = 15
-        self.max_line_gap = 100
+        self.hough_threshold = 15       # Daha düşük eşik (dönüşlerde çizgileri daha kolay tespit etmek için)
+        self.min_line_length = 15       # Daha kısa çizgileri de tespit et
+        self.max_line_gap = 100         # Optimize edilmiş boşluk toleransı
         
-        # Renk filtresi parametreleri - Temel değerler
+        # Renk filtresi parametreleri - Siyah zemin üzerinde beyaz şeritler için optimize edildi
+        # HSV renk aralıkları
         self.yellow_lower = np.array([15, 80, 120])
         self.yellow_upper = np.array([35, 255, 255])
-        self.white_lower = np.array([0, 0, 210])
-        self.white_upper = np.array([180, 30, 255])
-        
-        # Adaptif renk filtresi için yeni parametreler
-        self.use_adaptive_color = True  # Adaptif renk filtreyi etkinleştir
-        self.color_update_rate = 0.1  # Yeni değerlere ne kadar hızlı adapte olunacak (0-1)
-        self.min_white_pixels = 100  # Minimum beyaz piksel sayısı
-        self.max_white_percentage = 0.2  # Maksimum beyaz piksel yüzdesi
-        self.frame_history = []  # Son görüntülerin parlaklık değerlerini sakla
-        self.frame_history_size = 10  # Saklanacak görüntü sayısı
+        self.white_lower = np.array([0, 0, 210])      # Beyaz renk için optimize edildi
+        self.white_upper = np.array([180, 30, 255])   # Tüm beyaz tonları için genişletildi
         
         # Son şerit çizgileri (hafıza)
         self.last_left_lane = None
         self.last_right_lane = None
-        self.smoothing_factor = 0.85
+        self.smoothing_factor = 0.85  # Arttırıldı - kesikli çizgiler için daha iyi takip
         
         # Şerit kaybı durumunu takip etme
         self.lost_lane_counter = 0
-        self.max_lost_lane_frames = 10
+        self.max_lost_lane_frames = 10  # Bu kadar kare boyunca şerit bulunamazsa sıfırla
         
         # Debug görüntüleri
         self.debug_images = {}
         
         # Şerit renkleri
-        self.LANE_COLOR = (0, 255, 0)
-        self.LANE_THICKNESS = 8
+        self.LANE_COLOR = (0, 255, 0)  # Parlak yeşil
+        self.LANE_THICKNESS = 8  # Daha kalın çizgi
         
         # Tarihçe temelli şerit takibi iyileştirmesi
-        self.lane_history = {"left": [], "right": []}
-        self.history_size = 5
+        self.lane_history = {"left": [], "right": []}  # Son birkaç karenin şerit konumları
+        self.history_size = 5  # Hatırlanan kare sayısı
         
-        # Şerit genişliği tutarlılığı kontrolü
-        self.expected_lane_width = self.width * 0.5
-        self.lane_width_tolerance = 0.3
-        
-        # Yeni: Şerit tahmin modeli
-        self.lane_prediction_enabled = True
-        self.prediction_horizon = 5  # Kaç kare ileriye tahmin yapılacak
-        self.lane_model = {"left": None, "right": None}  # Basit polinom model
+        # Şerit genişliği tutarlılığı kontrolü (pixel cinsinden yaklaşık şerit genişliği)
+        self.expected_lane_width = self.width * 0.5  # Kalibrasyondan sonra güncellenecek
+        self.lane_width_tolerance = 0.3  # Şerit genişliği toleransı (%)
         
         # Kalibrasyon dosyasını yükle (varsa)
         self.load_calibration()
@@ -152,81 +140,10 @@ class LaneDetector:
             except Exception as e:
                 logger.warning(f"Kalibrasyon dosyası yüklenemedi: {e}")
     
-    def _update_color_thresholds(self, frame):
-        """
-        Görüntünün parlaklık ve kontrast özelliklerine göre renk eşiklerini günceller.
-        
-        Args:
-            frame (numpy.ndarray): Kaynak görüntü
-        """
-        if not self.use_adaptive_color:
-            return
-            
-        # Görüntüyü HSV'ye dönüştür
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(hsv)
-        
-        # Parlaklık istatistiklerini hesapla
-        v_mean = np.mean(v)
-        v_std = np.std(v)
-        
-        # Tarihçeye ekle
-        self.frame_history.append((v_mean, v_std))
-        if len(self.frame_history) > self.frame_history_size:
-            self.frame_history.pop(0)
-        
-        # Ortalama parlaklık ve standart sapma değerlerini hesapla
-        if len(self.frame_history) > 0:
-            mean_brightness = np.mean([x[0] for x in self.frame_history])
-            mean_std = np.mean([x[1] for x in self.frame_history])
-        else:
-            mean_brightness = v_mean
-            mean_std = v_std
-        
-        # Düşük parlaklık koşullarında (karanlık)
-        if mean_brightness < 100:
-            target_white_v = max(180, mean_brightness + 1.5 * mean_std)  # Daha düşük parlaklık eşiği
-            target_white_s = 50  # Daha yüksek doygunluk toleransı
-            target_yellow_s = 60  # Daha düşük sarı doygunluk eşiği
-        # Yüksek parlaklık koşullarında (aydınlık)
-        elif mean_brightness > 180:
-            target_white_v = 220  # Daha yüksek parlaklık eşiği
-            target_white_s = 20  # Daha düşük doygunluk toleransı 
-            target_yellow_s = 100  # Daha yüksek sarı doygunluk eşiği
-        # Normal aydınlatma koşullarında
-        else:
-            target_white_v = 210
-            target_white_s = 30
-            target_yellow_s = 80
-        
-        # Beyaz renk eşiklerini güncelle
-        new_white_lower = np.array([0, 0, target_white_v])
-        new_white_upper = np.array([180, target_white_s, 255])
-        
-        # Sarı renk eşiklerini güncelle
-        new_yellow_lower = np.array([15, target_yellow_s, 120])
-        new_yellow_upper = np.array([35, 255, 255])
-        
-        # Mevcut değerleri yeni değerlere doğru kademeli olarak güncelle
-        self.white_lower = self.white_lower * (1 - self.color_update_rate) + new_white_lower * self.color_update_rate
-        self.white_upper = self.white_upper * (1 - self.color_update_rate) + new_white_upper * self.color_update_rate
-        self.yellow_lower = self.yellow_lower * (1 - self.color_update_rate) + new_yellow_lower * self.color_update_rate
-        self.yellow_upper = self.yellow_upper * (1 - self.color_update_rate) + new_yellow_upper * self.color_update_rate
-        
-        # Int türüne çevir
-        self.white_lower = self.white_lower.astype(np.uint8)
-        self.white_upper = self.white_upper.astype(np.uint8)
-        self.yellow_lower = self.yellow_lower.astype(np.uint8)
-        self.yellow_upper = self.yellow_upper.astype(np.uint8)
-        
-        if self.debug:
-            logger.debug(f"Adaptif renk güncelleme: Ortalama Parlaklık: {mean_brightness:.1f}, Std: {mean_std:.1f}")
-            logger.debug(f"Yeni beyaz eşikleri: Alt: {self.white_lower}, Üst: {self.white_upper}")
-    
     def apply_color_filter(self, image):
         """
         Görüntüye renk filtresi uygular, beyaz şeritleri belirginleştirir.
-        Adaptif renk filtreleme ile farklı ışık koşullarına uyum sağlar.
+        Siyah zemin için optimize edilmiştir.
         
         Args:
             image (numpy.ndarray): İşlenecek renkli görüntü
@@ -234,9 +151,6 @@ class LaneDetector:
         Returns:
             numpy.ndarray: Renk filtrelenmiş binary görüntü
         """
-        # Renk eşiklerini bu görüntüye göre güncelle
-        self._update_color_thresholds(image)
-        
         # BGR'dan HSV'ye dönüştür
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
@@ -254,17 +168,17 @@ class LaneDetector:
         # HSV beyaz maskesi - geniş spektrum
         white_mask_hsv = cv2.inRange(hsv, self.white_lower, self.white_upper)
         
-        # Parlaklık bazlı maske
-        _, white_mask_v = cv2.threshold(v, self.white_lower[2], 255, cv2.THRESH_BINARY)
+        # Parlaklık bazlı maske - daha hassas (yüksek parlaklık = potansiyel beyaz şerit)
+        _, white_mask_v = cv2.threshold(v, 210, 255, cv2.THRESH_BINARY)
         
-        # L kanalı bazlı maske (LAB renk uzayı)
+        # L kanalı bazlı maske (LAB renk uzayı) - beyaz şeritler için iyi
         _, white_mask_l = cv2.threshold(l_channel, 210, 255, cv2.THRESH_BINARY)
         
-        # Gri tonlama için adaptif eşikleme
-        # Otsu eşikleme dinamik eşik değeri kullanır
+        # Gri tonlama için adaptif eşikleme - değişken ışık koşulları için
+        # Otsu eşikleme dinamik eşik değeri kullanır - daha iyi adaptasyon
         _, otsu_thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        # Adaptif eşik - bölgesel adaptasyon için
+        # Adaptif eşik - bölgesel adaptasyon için (gölgeli alanlar için daha iyi)
         adaptive_mask = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, -5
         )
@@ -272,40 +186,30 @@ class LaneDetector:
         # Güçlendirilmiş beyaz maske - tüm beyaz maskeleri birleştir
         white_mask = cv2.bitwise_or(white_mask_hsv, white_mask_v)
         white_mask = cv2.bitwise_or(white_mask, white_mask_l)
-        white_mask = cv2.bitwise_or(white_mask, otsu_thresh)
+        white_mask = cv2.bitwise_or(white_mask, otsu_thresh)  # Otsu ile iyileştir
         white_mask = cv2.bitwise_or(white_mask, adaptive_mask)
         
         # Sarı maske oluştur (eğer sarı çizgiler varsa)
         yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
         
         # İyileştirilmiş sarı algılama - a kanalı (LAB) yeşil-kırmızı spektrumu gösterir
+        # Sarı çizgiler pozitif a değerlerine sahiptir
         _, yellow_a_mask = cv2.threshold(a_channel, 120, 255, cv2.THRESH_BINARY)
         yellow_mask = cv2.bitwise_or(yellow_mask, yellow_a_mask)
         
         # Tüm maskeleri birleştir
         combined_mask = cv2.bitwise_or(white_mask, yellow_mask)
         
-        # Yeni: Beyaz piksellerin sayısını kontrol et
-        white_pixel_count = cv2.countNonZero(combined_mask)
-        white_pixel_percentage = white_pixel_count / (self.width * self.height)
-        
-        # Çok fazla veya çok az beyaz piksel varsa filtre parametrelerini ayarla
-        if white_pixel_percentage > self.max_white_percentage:
-            # Çok fazla beyaz piksel - eşikleri yükselt
-            logger.debug(f"Çok fazla beyaz piksel: {white_pixel_percentage:.3f}, eşikler yükseltiliyor")
-            self.white_lower[2] = min(self.white_lower[2] + 5, 240)  # Parlaklık eşiğini artır
-        elif white_pixel_count < self.min_white_pixels:
-            # Çok az beyaz piksel - eşikleri düşür
-            logger.debug(f"Çok az beyaz piksel: {white_pixel_count}, eşikler düşürülüyor")
-            self.white_lower[2] = max(self.white_lower[2] - 5, 150)  # Parlaklık eşiğini azalt
-        
-        # Morfolojik işlemler - gürültüyü azalt ve şeritleri belirginleştir
+        # Morfolojik işlemler (gürültü azaltma ve şerit kalınlaştırma)
+        # Önce küçük noktaları kaldır (açma işlemi)
         kernel_open = np.ones((3, 3), np.uint8)
         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_open)
         
+        # Sonra şeritleri birleştir/kalınlaştır (kapama işlemi)
         kernel_close = np.ones((5, 5), np.uint8)
         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close)
         
+        # Bilgisayarlı görme tekniği: Dilate (genişletme) - şeritleri daha görünür yapmak için
         kernel_dilate = np.ones((3, 3), np.uint8)
         combined_mask = cv2.dilate(combined_mask, kernel_dilate, iterations=1)
         
@@ -327,7 +231,6 @@ class LaneDetector:
     def preprocess_image(self, image):
         """
         Görüntüyü ön işlemden geçirir.
-        İyileştirilmiş kenar algılama ve gürültü azaltma.
         
         Args:
             image (numpy.ndarray): İşlenecek görüntü
@@ -338,65 +241,45 @@ class LaneDetector:
         # İlk olarak renk filtreleme uygula (daha güçlü şerit tespiti için)
         color_filtered = self.apply_color_filter(image)
         
-        # Gri tonlamaya dönüştürme
+        # Gri tonlamaya dönüştürme (eğer renk filtresi yeterince iyi değilse tamamlayıcı olarak kullan)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Geliştirilmiş gürültü azaltma - üç aşamalı
+        # Gürültü giderme (Geliştirilmiş gürültü azaltma)
         # 1. Bilateral filtre: Kenarları korurken gürültüyü azaltır
         bilateral = cv2.bilateralFilter(gray, 9, 75, 75)
         
         # 2. Gaussian Blur: Genel gürültü azaltma
         blurred = cv2.GaussianBlur(bilateral, (self.blur_kernel_size, self.blur_kernel_size), 0)
         
-        # 3. Medyan filtre: Dürtü (impuls) gürültüsünü azaltır
+        # 3. Medyan filtre: Dürtü (impuls) gürültüsünü azaltır (tuz-biber gürültüsü)
         median_filtered = cv2.medianBlur(blurred, 5)
         
-        # CLAHE ile kontrast iyileştirme
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        # Değişken ışık koşullarında daha iyi kontrast sağlar
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))  # CLAHE parametreleri iyileştirildi
         enhanced = clahe.apply(median_filtered)
         
         # Gamma düzeltme - düşük ışık koşullarında detayları öne çıkarmak için
-        gamma = 1.2
+        gamma = 1.2  # 1'den büyük değerler görüntüyü aydınlatır
         gamma_corrected = np.array(255 * (enhanced / 255) ** gamma, dtype='uint8')
         
-        # İyileştirilmiş Kenar Tespiti - Sobel ve Canny kombinasyonu
-        # Sobel filtresi ile gradyan bul (daha hassas kenar tespiti)
-        sobelx = cv2.Sobel(gamma_corrected, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gamma_corrected, cv2.CV_64F, 0, 1, ksize=3)
+        # Kenar tespiti (Canny) - parametreleri ince ayarla
+        edges = cv2.Canny(gamma_corrected, self.canny_low_threshold, self.canny_high_threshold)
         
-        # Gradyan büyüklüğünü hesapla
-        sobel_magnitude = np.sqrt(sobelx**2 + sobely**2)
-        sobel_magnitude = np.uint8(np.clip(sobel_magnitude, 0, 255))
-        
-        # Canny kenar tespiti (otomatik parametrelerle)
-        median_value = np.median(gamma_corrected)
-        lower_threshold = int(max(0, (1.0 - 0.33) * median_value))
-        upper_threshold = int(min(255, (1.0 + 0.33) * median_value))
-        
-        # Otomatik parametre yoksa tanımlanan parametreleri kullan
-        if lower_threshold == 0 or upper_threshold == 0:
-            lower_threshold = self.canny_low_threshold
-            upper_threshold = self.canny_high_threshold
-            
-        edges = cv2.Canny(gamma_corrected, lower_threshold, upper_threshold)
-        
-        # Sobel ve Canny sonuçlarını birleştir
-        combined_edges = cv2.bitwise_or(edges, sobel_magnitude)
-        
-        # Adaptif eşikleme
+        # Adaptif eşikleme (değişken ışık koşulları için)
         thresh_binary = cv2.adaptiveThreshold(
             enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, -2
         )
         
-        # Tüm sonuçları birleştir - en iyi sonucu elde etmek için
-        combined = cv2.bitwise_or(color_filtered, combined_edges)
+        # Renk filtresi ve kenar tespitini birleştir
+        combined = cv2.bitwise_or(color_filtered, edges)
         combined = cv2.bitwise_or(combined, thresh_binary)
         
         # Morfolojik işlemler - kenarları güçlendir
         kernel = np.ones((3, 3), np.uint8)
         combined = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
         
-        # İlgi bölgesi belirleme (ROI) - daha hassas bölge
+        # İlgi bölgesi belirleme (ROI) - optimize edilmiş şekli
         roi_mask = np.zeros_like(combined)
         roi_vertices = np.array([
             [0, self.height],
@@ -415,7 +298,6 @@ class LaneDetector:
             self.debug_images["masked_edges"] = cv2.cvtColor(masked_edges, cv2.COLOR_GRAY2BGR)
             self.debug_images["combined"] = cv2.cvtColor(combined, cv2.COLOR_GRAY2BGR)
             self.debug_images["gamma"] = cv2.cvtColor(gamma_corrected, cv2.COLOR_GRAY2BGR)
-            self.debug_images["sobel"] = cv2.cvtColor(sobel_magnitude, cv2.COLOR_GRAY2BGR)
             
             # ROI'yi görselleştir
             roi_viz = image.copy()
@@ -440,7 +322,6 @@ class LaneDetector:
     def detect_lane_lines(self, image):
         """
         Görüntüde şerit çizgilerini tespit eder.
-        İyileştirilmiş şerit takip algoritması.
         
         Args:
             image (numpy.ndarray): İşlenecek görüntü
@@ -483,14 +364,14 @@ class LaneDetector:
                     
                 slope = (y2 - y1) / (x2 - x1)
                 
-                # Çok küçük eğimli yatay çizgileri filtrele
+                # Çok küçük eğimli yatay çizgileri filtrele - Eşik değeri düşürüldü (daha hassas)
                 if abs(slope) < 0.25:
                     continue
                 
                 # Çizgi uzunluğunu hesapla
                 line_length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
                 
-                # Çok kısa çizgileri filtrele
+                # Çok kısa çizgileri filtrele (gürültü olabilir)
                 if line_length < self.min_line_length:
                     continue
                 
@@ -499,11 +380,11 @@ class LaneDetector:
                 
                 # İyileştirilmiş çizgi sınıflandırma mantığı
                 if slope < 0 and midpoint_x < self.width * 0.7:  # Sol şerit
-                    # Daha geniş eğim aralığı
+                    # Geçerli eğim aralığı (sol şerit için) - Hassaslaştırıldı
                     if -1.2 < slope < -0.2:
                         left_lines.append(line[0])
                 elif slope > 0 and midpoint_x > self.width * 0.3:  # Sağ şerit
-                    # Daha geniş eğim aralığı
+                    # Geçerli eğim aralığı (sağ şerit için) - Hassaslaştırıldı
                     if 0.2 < slope < 1.2:
                         right_lines.append(line[0])
         
@@ -518,7 +399,7 @@ class LaneDetector:
         if left_lane is None and right_lane is None:
             self.lost_lane_counter += 1
         else:
-            self.lost_lane_counter = max(0, self.lost_lane_counter - 1)
+            self.lost_lane_counter = max(0, self.lost_lane_counter - 1)  # Kademeli azalt
             
         # Belirli bir süre şerit bulunamazsa durumu sıfırla
         if self.lost_lane_counter > self.max_lost_lane_frames:
@@ -541,20 +422,6 @@ class LaneDetector:
             # Sağ şerit algılandı, sol şeridi tahmin et
             estimated_left_lane = self._estimate_parallel_lane(right_lane, is_right=False)
             left_lane = self._smooth_lane(estimated_left_lane, self.last_left_lane)
-        
-        # Yeni: İleri tahmin modeli ile şerit kaybını daha iyi yönet
-        if self.lane_prediction_enabled:
-            # Şerit modelini güncelle
-            self._update_lane_models(left_lane, right_lane)
-            
-            # Şerit tamamen kaybolursa tahmin et
-            if left_lane is None and self.lane_model["left"] is not None:
-                left_lane = self._predict_lane("left")
-                logger.debug("Sol şerit kaybı, model ile tahmin ediliyor")
-                
-            if right_lane is None and self.lane_model["right"] is not None:
-                right_lane = self._predict_lane("right")
-                logger.debug("Sağ şerit kaybı, model ile tahmin ediliyor")
         
         # Tarihçe tabanlı şerit tahminini güncelle
         self._update_lane_history(left_lane, right_lane)
@@ -1190,113 +1057,4 @@ class LaneDetector:
             # Debug görünümünü göster (ana görüntü yerine)
             result = debug_view
         
-        return result, center_diff
-
-    def _update_lane_models(self, left_lane, right_lane):
-        """
-        Algılanan şeritlerden tahmin modeli oluşturur.
-        
-        Args:
-            left_lane (tuple): Sol şerit parametreleri
-            right_lane (tuple): Sağ şerit parametreleri
-        """
-        # Sol şerit modeli güncelleme
-        if left_lane is not None:
-            # Son birkaç kareyi kullanarak daha doğru bir model oluştur
-            if "left" in self.lane_history and len(self.lane_history["left"]) > 2:
-                # Son verileri kullan (max 3 kare)
-                recent_data = self.lane_history["left"][-3:]
-                
-                # Y değerleri (görüntü yüksekliğine göre normalize et)
-                y_positions = np.array([0.6, 0.8, 1.0]) * self.height
-                
-                # X değerleri
-                x_positions = []
-                for lane_params in recent_data:
-                    m, b = lane_params
-                    x_vals = []
-                    for y in y_positions:
-                        try:
-                            x = (y - b) / m
-                            x_vals.append(x)
-                        except:
-                            x_vals.append(0)
-                    x_positions.append(x_vals)
-                
-                # X değerlerinin ortalamasını al
-                if x_positions:
-                    avg_x_positions = np.mean(x_positions, axis=0)
-                    
-                    # Polinom fit (ikinci dereceden - eğrilik için)
-                    if len(avg_x_positions) > 2:
-                        self.lane_model["left"] = np.polyfit(y_positions, avg_x_positions, 2)
-                    else:
-                        # Yeterli veri yoksa basit doğrusal model
-                        self.lane_model["left"] = np.polyfit(y_positions, avg_x_positions, 1)
-        
-        # Sağ şerit modeli güncelleme
-        if right_lane is not None:
-            # Sol şerit için uygulanan işlemin aynısı
-            if "right" in self.lane_history and len(self.lane_history["right"]) > 2:
-                recent_data = self.lane_history["right"][-3:]
-                y_positions = np.array([0.6, 0.8, 1.0]) * self.height
-                
-                x_positions = []
-                for lane_params in recent_data:
-                    m, b = lane_params
-                    x_vals = []
-                    for y in y_positions:
-                        try:
-                            x = (y - b) / m
-                            x_vals.append(x)
-                        except:
-                            x_vals.append(self.width)  # Sağ kenara yakın bir değer
-                    x_positions.append(x_vals)
-                
-                if x_positions:
-                    avg_x_positions = np.mean(x_positions, axis=0)
-                    
-                    if len(avg_x_positions) > 2:
-                        self.lane_model["right"] = np.polyfit(y_positions, avg_x_positions, 2)
-                    else:
-                        self.lane_model["right"] = np.polyfit(y_positions, avg_x_positions, 1)
-    
-    def _predict_lane(self, side):
-        """
-        Model kullanarak şerit parametrelerini tahmin eder.
-        
-        Args:
-            side (str): 'left' veya 'right'
-            
-        Returns:
-            tuple: Tahmin edilen şerit parametreleri (eğim, kesişim)
-        """
-        model = self.lane_model[side]
-        if model is None:
-            return None
-            
-        # Model katsayılarına göre tahmin türü
-        if len(model) > 2:  # Polinom model
-            # Alt ve üst noktalar için x koordinatlarını hesapla
-            y_bottom = self.height
-            y_top = self.height * 0.6
-            
-            # Polinom değerlendirme
-            x_bottom = np.polyval(model, y_bottom)
-            x_top = np.polyval(model, y_top)
-            
-            # Doğrusal modele dönüştür (m, b)
-            if x_bottom == x_top:  # Dikey çizgi durumu
-                return None
-                
-            m = (y_bottom - y_top) / (x_bottom - x_top)
-            b = y_bottom - m * x_bottom
-            
-            return (m, b)
-            
-        else:  # Doğrusal model
-            # Direkt olarak model parametrelerini dönüştür
-            m = 1.0 / model[0] if model[0] != 0 else 1000  # Sıfıra bölünmeyi önle
-            b = -model[1] / model[0] if model[0] != 0 else 0
-            
-            return (m, b) 
+        return result, center_diff 

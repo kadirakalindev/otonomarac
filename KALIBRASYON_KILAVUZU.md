@@ -1,237 +1,161 @@
-# KALIBRASYON KILAVUZU
+# Otonom Araç Kalibrasyon Kılavuzu
 
-Bu kılavuz, otonom araç projesindeki kalibrasyon ve test araçlarının kullanımını açıklamaktadır. Projedeki performans iyileştirmeleri ve yeni özellikler dahil edilmiştir.
+Bu kılavuz, otonom araç projesindeki şerit tespit sistemini kalibre etmek için oluşturulan araçları ve adımları içermektedir.
 
-## İçindekiler
+## Kalibrasyon Nedir ve Neden Önemlidir?
 
-1. [Araçlar ve Özellikleri](#araçlar-ve-özellikleri)
-2. [Kalibrasyon İşlemi](#kalibrasyon-işlemi)
-3. [Kamera Testi](#kamera-testi)
-4. [Performans Modları](#performans-modları)
-5. [Hata Giderme](#hata-giderme)
-6. [İpuçları ve Öneriler](#i̇puçları-ve-öneriler)
+Kalibrasyon işlemi, şerit tespit algoritmasının doğru çalışması için gerekli olan parametrelerin (perspektif dönüşümü, renk filtreleri, kenar algılama eşikleri vb.) ayarlanmasını içerir. İyi bir kalibrasyon:
 
-## Araçlar ve Özellikleri
+1. Şeritlerin doğru algılanmasını sağlar
+2. Farklı ışık koşullarında daha tutarlı sonuçlar üretir
+3. İşleme hızını optimize eder
+4. Aracın yönlendirme doğruluğunu artırır
 
-Projede yer alan temel araçlar:
+## Kalibrasyon Araçları
 
-### 1. `kalibrasyon_optimize.py`
+Projede üç farklı kalibrasyon aracı bulunmaktadır:
 
-Görsel kalibrasyon aracı. Kameradan gelen görüntü üzerinde interaktif olarak kalibrasyon yapmanızı sağlar.
+### 1. Görsel Kalibrasyon Aracı (`kalibrasyon_optimize.py`)
 
-**Özellikler:**
-- İyileştirilmiş kamera kontrolü (donma sorunu çözüldü)
-- Görsel kalibrasyon arayüzü
-- Kalibrasyon verilerini JSON formatında kaydetme
-- Farklı çözünürlük seçenekleri
-- Performans modları desteği
+Bu araç, kameradan alınan görüntü üzerinde tıklama yaparak perspektif dönüşüm noktalarını seçmenizi sağlar. Hafif ve optimize edilmiş versiyondur, donma sorunlarını çözmek için geliştirilmiştir.
 
 **Kullanım:**
-```bash
-python3 kalibrasyon_optimize.py --camera 0 --resolution 320x240 --output calibration.json --performance balanced
+```
+python3 kalibrasyon_optimize.py [--camera 0] [--resolution 320x240] [--output calibration.json]
 ```
 
-### 2. `kalibrasyon_olustur_optimize.py`
+**Adımlar:**
+1. Program kameradan gelen görüntüyü gösterir
+2. Şerit tespiti için 4 nokta seçmeniz gerekir:
+   - Sol üst (şeridin sol üst köşesi)
+   - Sağ üst (şeridin sağ üst köşesi) 
+   - Sol alt (genellikle ekranın sol alt köşesi)
+   - Sağ alt (genellikle ekranın sağ alt köşesi)
+3. Noktaları seçtikten sonra 'S' tuşuna basarak kaydedebilir veya 'R' tuşuna basarak yeniden başlatabilirsiniz
+4. ESC tuşu ile programdan çıkabilirsiniz
 
-Komut satırı tabanlı kalibrasyon aracı. İnteraktif mod ile kalibrasyon parametrelerini ayarlayabilirsiniz.
+### 2. Komut Satırı Kalibrasyon Aracı (`kalibrasyon_olustur_optimize.py`) 
 
-**Özellikler:**
-- İnteraktif mod (trackbar ile parametreleri ayarlama)
-- Hızlı mod (otomatik kalibrasyon)
-- Bellek optimizasyonları
-- Adaptif renk filtreleme desteği
+Bu araç, görsel arayüz kullanmadan komut satırı üzerinden kalibrasyon dosyası oluşturmanızı sağlar. İki şekilde kullanabilirsiniz:
 
-**Kullanım:**
-```bash
-python3 kalibrasyon_olustur_optimize.py --interactive --performance balanced
+**İnteraktif Mod:**
+```
+python3 kalibrasyon_olustur_optimize.py --interactive [--resolution 320x240] [--output calibration.json]
+```
+Bu mod size adım adım kalibrasyon noktalarını girmeniz için rehberlik eder.
+
+**Hızlı Mod:**
+```
+python3 kalibrasyon_olustur_optimize.py --quick-mode [--resolution 320x240] [--output calibration.json]
+```
+Bu mod varsayılan değerlerle hızlıca kalibrasyon dosyası oluşturur.
+
+**Manuel Nokta Girişi:**
+```
+python3 kalibrasyon_olustur_optimize.py --src-points "112,156" "208,156" "0,240" "320,240" [--dst-points "80,0" "240,0" "80,240" "240,240"] [--output calibration.json]
+```
+Bu kullanımda noktaları doğrudan komut satırından belirtebilirsiniz.
+
+### 3. Orijinal Kalibrasyon Aracı (`kalibrasyon.py`)
+
+Bu, projenin orijinal kalibrasyon aracıdır. Bazı durumlarda donma sorunları yaşanabilir, bu nedenle optimize edilmiş versiyonları kullanmanızı öneririz.
+
+## Kalibrasyon İş Akışı
+
+### Adım 1: İlk Kalibrasyon Dosyasını Oluşturun
+
+Başlangıçta, varsayılan değerlerle bir kalibrasyon dosyası oluşturun:
+
+```
+python3 kalibrasyon_olustur_optimize.py --quick-mode
 ```
 
-### 3. `kamera_test.py`
+### Adım 2: Kalibrasyon Test Edin
 
-Kamera ve şerit tespit algoritmalarını test etmenizi sağlar.
+Oluşturulan kalibrasyon dosyasını test edin:
 
-**Özellikler:**
-- Gerçek zamanlı şerit tespiti ve gösterimi
-- Direksiyon açısı göstergesi
-- Performans metrikleri (FPS, işleme süresi)
-- Farklı performans modları
-- Histogram görüntüleme
-- Bellek optimizasyonları ve kare atlama desteği
-
-**Kullanım:**
-```bash
-python3 kamera_test.py --camera 0 --resolution 320x240 --histogram --performance balanced
+```
+python3 kamera_test.py --debug
 ```
 
-### 4. `video_test.py`
+veya bir video dosyası üzerinde:
 
-Video dosyaları üzerinde şerit tespit algoritmalarını test etmenizi sağlar.
-
-**Özellikler:**
-- Video oynatma kontrolü (duraklat/devam et, hızlandır/yavaşlat)
-- Performans modları desteği
-- Bellek optimizasyonları
-- Görüntü kaydetme
-
-**Kullanım:**
-```bash
-python3 video_test.py --video test_video.mp4 --resolution 320x240 --performance balanced
+```
+python3 video_test.py --video <video_dosyası> --debug
 ```
 
-### 5. `goruntu_yakala.py`
+### Adım 3: Kalibrasyon İyileştirin
 
-Test görüntülerini yakalamak için basit bir araç.
+Sonuçlar tatmin edici değilse, görsel kalibrasyon aracını kullanarak daha iyi sonuçlar elde etmeyi deneyin:
 
-**Kullanım:**
-```bash
-python3 goruntu_yakala.py --output test_goruntu.jpg
+```
+python3 kalibrasyon_optimize.py
 ```
 
-## Kalibrasyon İşlemi
+### Adım 4: İnce Ayar Yapın
 
-Kalibrasyon, şerit tespitinin doğru çalışması için son derece önemlidir. Aşağıdaki adımları izleyin:
+Gerekirse kalibrasyon parametrelerini interaktif modda ince ayarlayın:
 
-### Hızlı Başlangıç
-
-1. Kalibrasyon aracını çalıştırın:
-   ```bash
-   python3 kalibrasyon_optimize.py --camera 0 --resolution 320x240
-   ```
-
-2. Aşağıdaki tuşları kullanarak görsel kalibrasyon yapın:
-   - `R`: Renk eşiklerini sıfırla
-   - `S`: Mevcut kalibrasyonu kaydet
-   - `ESC`: Çıkış
-   - Mouse ile perspektif noktalarını ayarlayın
-
-### Detaylı Kalibrasyon
-
-Daha detaylı bir kalibrasyon için interaktif mod kullanın:
-
-```bash
+```
 python3 kalibrasyon_olustur_optimize.py --interactive
 ```
 
-Bu mod, trackbar'lar aracılığıyla tüm parametreleri hassas bir şekilde ayarlamanızı sağlar.
+## Kalibrasyon İpuçları
 
-## Kamera Testi
+1. **İyi Işık Koşulları**: Kalibrasyon yaparken iyi aydınlatılmış bir ortam kullanın
 
-Kalibrasyon sonrasında şerit tespitini test etmek için:
+2. **Belirgin Şeritler**: Test ortamında belirgin şeritleri olan bir test parkuru tercih edin
 
-```bash
-python3 kamera_test.py --camera 0 --histogram
+3. **Stabil Kamera Pozisyonu**: Kalibrasyon sırasında ve sonrasında kameranın pozisyonunu değiştirmeyin
+
+4. **Doğru Nokta Seçimi**:
+   - Sol ve sağ üst noktaları, şeritlerin orta uzaklıktaki noktalarına yerleştirin
+   - Alt noktaları genellikle ekranın alt kenarlarına yerleştirin
+   - Kuş bakışı görünümde paralel çizgiler elde etmeye çalışın
+
+5. **İterasyonlu Test**: Kalibrasyon yaptıktan sonra test edin, gerekirse tekrar kalibre edin
+
+## Kalibrasyon Parametreleri
+
+Kalibrasyon dosyasındaki (`calibration.json`) temel parametreler şunlardır:
+
+```json
+{
+  "src_points": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],  // Kaynak perspektif noktaları
+  "dst_points": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],  // Hedef perspektif noktaları
+  "resolution": {"width": 320, "height": 240},          // Çözünürlük
+  "canny_low_threshold": 50,                           // Canny kenar algılama alt eşiği
+  "canny_high_threshold": 150,                         // Canny kenar algılama üst eşiği
+  "blur_kernel_size": 5,                               // Bulanıklaştırma çekirdek boyutu
+  "hough_threshold": 15,                               // Hough çizgi tespiti eşiği
+  "min_line_length": 15,                               // Minimum çizgi uzunluğu
+  "max_line_gap": 100,                                 // Maksimum çizgi aralığı
+  "white_lower": [0, 0, 210],                          // Beyaz renk filtresi alt değer (HSV)
+  "white_upper": [180, 30, 255],                       // Beyaz renk filtresi üst değer (HSV)
+  "yellow_lower": [15, 80, 120],                       // Sarı renk filtresi alt değer (HSV)
+  "yellow_upper": [35, 255, 255]                       // Sarı renk filtresi üst değer (HSV)
+}
 ```
 
-**Tuş Kontrolleri:**
-- `q`: Çıkış
-- `space`: Duraklat/Devam Et
-- `s`: Görüntüyü Kaydet
-- `p`: Performans Modunu Değiştir
+## Sorun Giderme
 
-## Performans Modları
+1. **Kalibrasyon Aracı Donuyor**: `kalibrasyon_optimize.py` veya `kalibrasyon_olustur_optimize.py` araçlarını kullanın
 
-Tüm araçlar üç farklı performans modunu destekler:
+2. **Şeritler Algılanmıyor**:
+   - Perspektif noktalarını yeniden ayarlayın
+   - Renk filtreleri değerlerini ortam ışık koşullarına göre ayarlayın
+   - Canny eşik değerlerini değiştirin
 
-### 1. `speed` (Hız)
+3. **Şerit Tespiti Kararsız**:
+   - `max_line_gap` değerini artırın
+   - `min_line_length` değerini azaltın
+   - Daha düşük çözünürlük kullanın (320x240 önerilir)
 
-Bu mod, düşük işlem gücüne sahip cihazlarda daha hızlı çalışmak için optimize edilmiştir.
+4. **İşlem Hızı Yavaş**:
+   - Daha düşük çözünürlük kullanın
+   - `blur_kernel_size` değerini azaltın
+   - Debug modunu kapatın
 
-**Özellikler:**
-- Düşük çözünürlük işleme
-- Kare atlama özelliği
-- Basitleştirilmiş algoritma
+## İletişim ve Destek
 
-**Kullanım:**
-```bash
-python3 kamera_test.py --performance speed
-```
-
-### 2. `balanced` (Dengeli)
-
-Varsayılan mod. Performans ve doğruluk arasında denge sağlar.
-
-**Özellikler:**
-- Orta seviye çözünürlük
-- Adaptif renk filtreleme
-- Optimum bellek kullanımı
-
-**Kullanım:**
-```bash
-python3 kamera_test.py --performance balanced
-```
-
-### 3. `quality` (Kalite)
-
-En yüksek doğruluk için optimize edilmiş mod. Daha güçlü donanım gerektirir.
-
-**Özellikler:**
-- Tam çözünürlük işleme
-- Gelişmiş kenar algılama
-- Tam şerit izleme modeli
-
-**Kullanım:**
-```bash
-python3 kamera_test.py --performance quality
-```
-
-## Hata Giderme
-
-### Yaygın Sorunlar ve Çözümleri
-
-1. **Motor sürücüsü aşırı ısınması:** 
-   - `main.py` dosyasında `max_speed` ve `pwm_frequency` değerlerini düşürün
-   - PID parametrelerini daha yumuşak kontrol için ayarlayın
-
-2. **Şerit tespiti sorunları:**
-   - Adaptif renk filtreleme için `use_adaptive_color` parametresini etkinleştirin
-   - Işık koşullarına göre kalibrasyon yapın
-
-3. **Performans sorunları:**
-   - Düşük işlem gücü olan cihazlarda `--performance speed` modunu kullanın
-   - İşlem çözünürlüğünü düşürün: `--resolution 160x120`
-
-4. **Kamera bağlantı sorunları:**
-   - Farklı bir kamera ID'si deneyin: `--camera 1`
-   - Kamera çözünürlüğünün desteklendiğinden emin olun
-
-## İpuçları ve Öneriler
-
-1. **Şerit algılama performansını artırmak için:**
-   - Yeterli ışık koşullarında kalibrasyon yapın
-   - Şerit çizgilerini içeren test görüntüleri toplayın
-   - Adaptif renk filtreleme özelliğini kullanın
-
-2. **Motor kontrolü için:**
-   - Ramping mekanizmasını kullanarak ani hız değişimlerini önleyin
-   - Düşük pwm_frequency (20-30Hz) ile motor sürücüsünün ısınmasını azaltın
-   - Otomatik PID ayarlama özelliğini etkinleştirin
-
-3. **Çalışma zamanı optimizasyonları:**
-   - Düşük işlem gücüne sahip cihazlarda 'speed' performans modunu kullanın
-   - Periyodik bellek temizliği için gc.collect() çağrısı projeye eklenmiştir
-   - Önbellek tamponları ile bellek kullanımı optimize edilmiştir
-
-4. **Kalibrasyon işlemi için:**
-   - Kalibrasyon için araç üzerindeki kameranın gerçek konumunu kullanın
-   - Perspektif dönüşümü için yol üzerindeki çizgileri referans alın
-   - Kalibrasyon sonrası mutlaka kamera_test.py ile test edin
-
-## Örnek Çalıştırma Komutları
-
-### Kalibrasyon ve Test Akışı:
-
-```bash
-# 1. Görsel kalibrasyon
-python3 kalibrasyon_optimize.py --camera 0 --resolution 320x240 --output calibration.json
-
-# 2. Kalibrasyon parametrelerini ayarlama
-python3 kalibrasyon_olustur_optimize.py --interactive
-
-# 3. Kamera testi (histogram ve dengeli performans ile)
-python3 kamera_test.py --camera 0 --histogram --performance balanced
-
-# 4. Ana programı çalıştırma (optimize edilmiş ayarlarla)
-python3 main.py --calibration calibration.json --performance balanced
-```
-
-Bu kılavuzdaki komutlar ve parametreler, projenin mevcut durumuna göre güncellenmiştir. Yeni eklenen performans iyileştirmeleri ve özellikler dahil edilmiştir. 
+Kalibrasyon araçları veya şerit tespit sistemi ile ilgili sorularınız için proje yöneticisiyle iletişime geçin. 
