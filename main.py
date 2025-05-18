@@ -117,33 +117,57 @@ class OtonomArac:
             logger.info("Kamera başlatılıyor...")
             self.camera = Picamera2()
             
-            # Kamera yapılandırması
-            self.camera_config = self.camera.create_preview_configuration(
+            # Kamera yapılandırması - daha detaylı
+            preview_config = self.camera.create_preview_configuration(
                 main={"size": self.camera_resolution, "format": "RGB888"},
-                controls={"FrameRate": self.framerate}
+                lores={"size": (320, 240), "format": "YUV420"},
+                display="lores",
+                buffer_count=4  # Buffer sayısını artır
             )
-            self.camera.configure(self.camera_config)
+            self.camera.configure(preview_config)
             
-            # Kamera özel ayarlarını düzenleme (daha iyi şerit tespiti için)
-            controls = {
-                "AwbEnable": True,          # Otomatik beyaz dengesi
-                "AeEnable": True,           # Otomatik pozlama
-                "AwbMode": 0,               # Auto (otomatik beyaz dengesi modu)
-                "ExposureTime": 15000,      # Pozlama süresi - daha da düşürüldü
-                "Sharpness": 2.5,           # Keskinlik - artırıldı
-                "Contrast": 1.3,            # Kontrast - artırıldı
-                "Brightness": 0.5,          # Parlaklık - eklendi
-                "Saturation": 1.2           # Doygunluk - eklendi
-            }
-            self.camera.set_controls(controls)
+            # Kamera özel ayarlarını düzenleme
+            try:
+                controls = {
+                    "AwbEnable": True,          # Otomatik beyaz dengesi
+                    "AeEnable": True,           # Otomatik pozlama
+                    "ExposureTime": 10000,      # Pozlama süresi (mikrosaniye)
+                    "AnalogueGain": 1.0,        # Analog kazanç
+                    "Brightness": 0.0,          # Parlaklık
+                    "Contrast": 1.0,            # Kontrast
+                    "Sharpness": 1.0,           # Keskinlik
+                    "NoiseReductionMode": 1     # Gürültü azaltma
+                }
+                self.camera.set_controls(controls)
+                logger.info("Kamera kontrolleri ayarlandı")
+            except Exception as e:
+                logger.warning(f"Kamera kontrolleri ayarlanırken hata: {e}")
             
-            # Kameranın dengelenmesi için daha uzun bekle
+            # Kamerayı başlat
+            self.camera.start()
+            
+            # Test görüntüsü al
+            logger.info("Kamera test ediliyor...")
+            for _ in range(3):  # 3 kere dene
+                try:
+                    test_frame = self.camera.capture_array()
+                    if test_frame is not None and test_frame.size > 0:
+                        logger.info(f"Kamera test başarılı. Görüntü boyutu: {test_frame.shape}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Test görüntüsü alınamadı, tekrar deneniyor: {e}")
+                time.sleep(0.5)
+            
+            # Kameranın dengelenmesi için bekle
             logger.info("Kamera dengeleniyor...")
-            time.sleep(2.5)
+            time.sleep(2)
             
-            logger.info("Kamera yapılandırması tamamlandı.")
+            logger.info("Kamera başarıyla başlatıldı.")
+            
         except Exception as e:
             logger.error(f"Kamera başlatma hatası: {e}")
+            if hasattr(self, 'camera') and self.camera is not None:
+                self.camera.close()
             raise
     
     def signal_handler(self, sig, frame):
@@ -175,11 +199,6 @@ class OtonomArac:
             # Kamera başlatma ve yapılandırma
             if self.camera is None:
                 self._initialize_camera()
-                self.camera.start()
-                
-                # Kameranın dengelenmesi için bekle
-                logger.info("Kamera dengeleniyor...")
-                time.sleep(1.5)
             
             # FPS hesaplama değişkenlerini başlat
             self.fps_start_time = time.time()
@@ -189,6 +208,7 @@ class OtonomArac:
             if self.debug:
                 cv2.namedWindow("Otonom Arac", cv2.WINDOW_NORMAL)
                 cv2.setWindowTitle("Otonom Arac", "Otonom Arac - Serit Tespiti")
+                cv2.resizeWindow("Otonom Arac", self.camera_resolution[0], self.camera_resolution[1])
             
             # Debug modunda son frame update zamanı
             last_debug_update = 0
@@ -199,6 +219,12 @@ class OtonomArac:
                 try:
                     # Kameradan görüntü al
                     frame = self.camera.capture_array()
+                    if frame is None or frame.size == 0:
+                        raise Exception("Geçersiz kamera görüntüsü")
+                    
+                    # BGR'ye dönüştür (OpenCV için)
+                    if len(frame.shape) == 3 and frame.shape[2] == 3:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                     
                     # Görüntüyü işle ve şeritleri tespit et
                     processed_frame, center_diff = self.lane_detector.process_frame(frame)
