@@ -37,10 +37,10 @@ class MotorController:
                  right_motor_pins=(36, 38),   # Sağ motor için (IN1, IN2) pin numaraları
                  left_pwm_pin=12,             # Sol motor için PWM enable pini
                  right_pwm_pin=32,            # Sağ motor için PWM enable pini
-                 max_speed=0.6,               # Maksimum hızı düşürdük (0.7 -> 0.6)
-                 default_speed=0.3,           # Varsayılan hızı düşürdük (0.35 -> 0.3)
+                 max_speed=0.50,              # Maksimum hızı biraz daha düşürdük
+                 default_speed=0.25,          # Varsayılan hızı düşürdük
                  use_board_pins=True,         # BOARD pin numaralandırmasını kullan
-                 pwm_frequency=25):          # PWM frekansı (Hz) - daha da azaltıldı (50Hz->25Hz)
+                 pwm_frequency=25):          # PWM frekansı
         """
         MotorController sınıfını başlatır.
         
@@ -115,26 +115,26 @@ class MotorController:
             self.cleanup()
             raise
         
-        # Başlangıç motor faktörleri - sağ motor için daha düşük başlangıç değeri
-        self.left_motor_factor = 1.0
-        self.right_motor_factor = 0.85  # Sağ motor için %85 güç
+        # Başlangıç motor faktörleri - sol motor için daha düşük başlangıç değeri
+        self.left_motor_factor = 0.85  # Sol motor için %85 güç
+        self.right_motor_factor = 0.9   # Sağ motor için %90 güç
         
         # Motor hız limitleri
-        self.min_motor_speed = 0.15  # Minimum hızı düşürdük (0.2 -> 0.15)
+        self.min_motor_speed = 0.15
         
-        # PID kontrol parametreleri - daha hassas kontrol için güncellendi
-        self.kp = 0.4   # Orantısal katsayı (0.5 -> 0.4)
-        self.ki = 0.01  # İntegral katsayı (0.02 -> 0.01)
-        self.kd = 0.15  # Türev katsayı (0.1 -> 0.15)
+        # PID kontrol parametreleri - daha hassas kontrol
+        self.kp = 0.35  # Orantısal katsayı (0.4 -> 0.35)
+        self.ki = 0.008  # İntegral katsayı (0.01 -> 0.008)
+        self.kd = 0.18  # Türev katsayı (0.15 -> 0.18)
         
         # PID sınırları
-        self.kp_min, self.kp_max = 0.2, 0.6
-        self.ki_min, self.ki_max = 0.005, 0.05
+        self.kp_min, self.kp_max = 0.2, 0.5
+        self.ki_min, self.ki_max = 0.005, 0.03
         self.kd_min, self.kd_max = 0.1, 0.3
         
         # Şerit takibi için parametreler
-        self.center_deadzone = 0.1  # Merkez toleransı (0.15 -> 0.1)
-        self.turn_speed_factor = 0.3  # Dönüş hızı faktörü (0.25 -> 0.3)
+        self.center_deadzone = 0.08  # Merkez toleransı (0.1 -> 0.08)
+        self.turn_speed_factor = 0.25  # Dönüş hızı faktörü (0.3 -> 0.25)
         
         # Adaptif PID sistemi için parametreler
         self.enable_adaptive_pid = True  # Adaptif PID sistemini etkinleştir
@@ -306,18 +306,18 @@ class MotorController:
         left_avg = sum(self.motor_speed_history['left']) / len(self.motor_speed_history['left'])
         right_avg = sum(self.motor_speed_history['right']) / len(self.motor_speed_history['right'])
         
-        # Hız farkı varsa faktörleri güncelle - sağ motor için daha hassas ayarlama
-        if abs(left_avg - right_avg) > 0.05:
-            if left_avg < right_avg:
-                # Sol motor daha yavaşsa, sağ motoru daha fazla azalt
-                self.right_motor_factor = max(0.7, self.right_motor_factor * 0.95)
-                if self._should_log():
-                    logger.info(f"Sağ motor faktörü azaltıldı: {self.right_motor_factor:.2f}")
-            else:
-                # Sol motor daha hızlıysa, sol motoru azalt
-                self.left_motor_factor = max(0.7, self.left_motor_factor * 0.95)
+        # Hız farkı varsa faktörleri güncelle
+        if abs(left_avg - right_avg) > 0.03:  # Daha hassas fark tespiti (0.05 -> 0.03)
+            if left_avg > right_avg:
+                # Sol motor daha hızlıysa, sol motoru daha fazla azalt
+                self.left_motor_factor = max(0.75, self.left_motor_factor * 0.93)
                 if self._should_log():
                     logger.info(f"Sol motor faktörü azaltıldı: {self.left_motor_factor:.2f}")
+            else:
+                # Sağ motor daha hızlıysa, sağ motoru azalt
+                self.right_motor_factor = max(0.75, self.right_motor_factor * 0.93)
+                if self._should_log():
+                    logger.info(f"Sağ motor faktörü azaltıldı: {self.right_motor_factor:.2f}")
             
             self.motor_speed_history['left'].clear()
             self.motor_speed_history['right'].clear()
@@ -506,25 +506,25 @@ class MotorController:
         # PID kontrol çıktısını hesapla
         correction = self.calculate_pid(center_diff)
         
-        # Temel hızları ayarla - sağ motor için daha düşük temel hız
-        base_speed_left = speed * 0.9
-        base_speed_right = speed * 0.85  # Sağ motor için daha düşük temel hız
+        # Temel hızları ayarla - sol motor için daha düşük temel hız
+        base_speed_left = speed * 0.85  # Sol motor için daha düşük temel hız
+        base_speed_right = speed * 0.9
         turn_speed = speed * self.turn_speed_factor
         
         # Sapma değerine göre motor hızlarını ayarla
         if abs(center_diff) < self.center_deadzone:
-            # Düz giderken bile sağ motor daha yavaş
+            # Düz giderken bile sol motor daha yavaş
             left_speed = base_speed_left
             right_speed = base_speed_right
         else:
             if center_diff < 0:  # Sola dön
-                # Sola dönüşlerde sağ motoru daha az hızlandır
-                left_speed = base_speed_left - (abs(center_diff) * turn_speed * 1.2)
-                right_speed = base_speed_right + (abs(center_diff) * turn_speed * 0.8)
+                # Sola dönüşlerde sağ motoru daha fazla hızlandır
+                left_speed = base_speed_left - (abs(center_diff) * turn_speed)
+                right_speed = base_speed_right + (abs(center_diff) * turn_speed * 1.1)
             else:  # Sağa dön
-                # Sağa dönüşlerde sol motoru daha fazla hızlandır
-                left_speed = base_speed_left + (abs(center_diff) * turn_speed * 1.2)
-                right_speed = base_speed_right - (abs(center_diff) * turn_speed * 0.8)
+                # Sağa dönüşlerde sol motoru daha az hızlandır
+                left_speed = base_speed_left + (abs(center_diff) * turn_speed * 0.9)
+                right_speed = base_speed_right - (abs(center_diff) * turn_speed)
         
         # Hızları sınırla
         left_speed = max(min(left_speed, self.max_speed), self.min_motor_speed)
