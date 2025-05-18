@@ -54,9 +54,42 @@ class MotorController:
             use_board_pins (bool): BOARD pin numaralandırmasını kullan (True) veya BCM kullan (False)
             pwm_frequency (int): PWM frekansı (Hz) - aşırı ısınmayı önlemek için düşürüldü
         """
+        # Pin numaralarını doğrula
+        if not all(isinstance(pin, int) for pin in [*left_motor_pins, *right_motor_pins, left_pwm_pin, right_pwm_pin]):
+            raise ValueError("Tüm pin değerleri tam sayı olmalıdır")
+            
+        # Hız değerlerini doğrula
+        if not 0 < max_speed <= 1 or not 0 < default_speed <= max_speed:
+            raise ValueError("Geçersiz hız değerleri")
+            
+        # PWM frekansını doğrula
+        if not 20 <= pwm_frequency <= 100:
+            raise ValueError("PWM frekansı 20-100 Hz aralığında olmalıdır")
+            
         self.use_board_pins = use_board_pins
         self.max_speed = max_speed
         self.default_speed = default_speed
+        self.min_motor_speed = 0.15  # Minimum çalışma hızı
+        
+        # Motor durumu izleme
+        self.motor_states = {
+            'left': {'running': False, 'speed': 0, 'direction': 'stop'},
+            'right': {'running': False, 'speed': 0, 'direction': 'stop'}
+        }
+        
+        # Güvenlik limitleri
+        self.max_continuous_run_time = 300  # 5 dakika
+        self.overheat_cooldown_time = 60    # 1 dakika
+        self.last_cooldown_time = 0
+        self.run_start_time = 0
+        
+        # Motor sağlığı izleme
+        self.motor_health = {
+            'left': {'errors': 0, 'last_error_time': 0},
+            'right': {'errors': 0, 'last_error_time': 0}
+        }
+        self.max_motor_errors = 5
+        self.error_reset_time = 60  # 1 dakika
         
         # Pin numaralarını ayarla (BOARD -> BCM dönüşümü gerekirse)
         if use_board_pins:
@@ -115,34 +148,30 @@ class MotorController:
             self.cleanup()
             raise
         
-        # Başlangıç motor faktörleri - sol motor için daha düşük başlangıç değeri
-        self.left_motor_factor = 0.85  # Sol motor için %85 güç
-        self.right_motor_factor = 0.9   # Sağ motor için %90 güç
+        # Başlangıç motor faktörleri
+        self.left_motor_factor = 0.9
+        self.right_motor_factor = 0.9
         
-        # Motor hız limitleri
-        self.min_motor_speed = 0.15
+        # PID kontrol parametreleri - yeniden ayarlandı
+        self.kp = 0.3    # Orantısal katsayı - azaltıldı
+        self.ki = 0.0005 # İntegral katsayı - azaltıldı
+        self.kd = 0.15   # Türev katsayı - azaltıldı
         
-        # PID kontrol parametreleri - daha hassas kontrol
-        self.kp = 0.35  # Orantısal katsayı (0.4 -> 0.35)
-        self.ki = 0.008  # İntegral katsayı (0.01 -> 0.008)
-        self.kd = 0.18  # Türev katsayı (0.15 -> 0.18)
-        
-        # PID sınırları
+        # PID sınırları - daraltıldı
         self.kp_min, self.kp_max = 0.2, 0.5
-        self.ki_min, self.ki_max = 0.005, 0.03
-        self.kd_min, self.kd_max = 0.1, 0.3
+        self.ki_min, self.ki_max = 0.0002, 0.005
+        self.kd_min, self.kd_max = 0.1, 0.2
         
         # Şerit takibi için parametreler
-        self.center_deadzone = 0.08  # Merkez toleransı (0.1 -> 0.08)
-        self.turn_speed_factor = 0.25  # Dönüş hızı faktörü (0.3 -> 0.25)
+        self.center_deadzone = 0.08  # Merkez toleransı - artırıldı
+        self.turn_speed_factor = 0.2  # Dönüş hızı faktörü
         
         # Adaptif PID sistemi için parametreler
-        self.enable_adaptive_pid = True  # Adaptif PID sistemini etkinleştir
-        self.performance_history = []    # Performans geçmişini tutacak liste
-        self.history_max_length = 50     # Maksimum geçmiş uzunluğu
-        self.error_history = []          # Hata geçmişi
-        self.pid_update_interval = 2.0   # PID güncelleme aralığı (saniye)
-        self.last_pid_update = time.time()
+        self.enable_adaptive_pid = True
+        self.performance_history = []
+        self.history_max_length = 50
+        self.error_history = []
+        self.pid_update_interval = 1.5  # Güncelleme aralığı azaltıldı
         
         # PID ayarlama limitleri
         self.kp_min, self.kp_max = 0.3, 0.8
@@ -244,51 +273,46 @@ class MotorController:
             
     def calculate_pid(self, error):
         """
-        PID kontrolü hesaplar. Hata değerine göre motorlara uygulanacak hız düzeltmesini döndürür.
-        
-        Args:
-            error (float): Orta çizgiden sapma hatası (negatif: sola sapma, pozitif: sağa sapma)
-        
-        Returns:
-            float: PID çıkışı (motor hız düzeltme değeri)
+        PID kontrolü hesaplar
         """
-        # Hata geçmişini güncelle
+        # Hata geçmişini güncelle (Adaptif PID için)
         self.error_history.append(error)
         if len(self.error_history) > self.history_max_length:
             self.error_history.pop(0)
-            
-        # PID parametrelerini gerekirse güncelle
+        
+        # PID parametrelerini güncelle
         self._update_pid_parameters()
         
-        # Zaman farkını hesapla
         current_time = time.time()
         dt = current_time - self.last_time
         self.last_time = current_time
         
-        # dt sıfırsa veya çok küçükse
         if dt < 0.001:
             dt = 0.001
-            
-        # Deadband - çok küçük hatalar için düzeltme yapma
-        if abs(error) < 0.05:
+        
+        # Çok küçük hatalar için düzeltme yapma
+        if abs(error) < 0.02:
+            self.integral = 0  # İntegral birikimini sıfırla
+            self.previous_error = 0
             return 0
         
         # PID bileşenlerini hesapla
-        # Orantısal terim
         p_term = self.kp * error
         
-        # İntegral terimi
-        self.integral += error * dt
-        # İntegral terimini sınırla (anti-windup)
-        self.integral = max(-self.max_integral, min(self.integral, self.max_integral))
+        # İntegral terimi - sınırlı integral
+        self.integral = max(-30, min(30, self.integral + error * dt))
         i_term = self.ki * self.integral
         
-        # Türev terimi
+        # Türev terimi - ani değişimleri yumuşat
         derivative = (error - self.previous_error) / dt
+        derivative = max(-50, min(50, derivative))  # Türevi sınırla
         d_term = self.kd * derivative
         
         # Toplam PID çıkışı
         output = p_term + i_term + d_term
+        
+        # PID çıkışını sınırla
+        output = max(-1, min(1, output))
         
         # Bir sonraki hesaplama için hatayı kaydet
         self.previous_error = error
@@ -306,112 +330,160 @@ class MotorController:
         left_avg = sum(self.motor_speed_history['left']) / len(self.motor_speed_history['left'])
         right_avg = sum(self.motor_speed_history['right']) / len(self.motor_speed_history['right'])
         
-        # Hız farkı varsa faktörleri güncelle
-        if abs(left_avg - right_avg) > 0.03:  # Daha hassas fark tespiti (0.05 -> 0.03)
+        # Hız farkı varsa faktörleri güncelle - daha yumuşak düzeltme
+        if abs(left_avg - right_avg) > 0.02:  # Daha hassas fark tespiti
             if left_avg > right_avg:
-                # Sol motor daha hızlıysa, sol motoru daha fazla azalt
-                self.left_motor_factor = max(0.75, self.left_motor_factor * 0.93)
+                # Sol motor daha hızlıysa, sol motoru azalt
+                self.left_motor_factor = max(0.8, self.left_motor_factor * 0.95)
                 if self._should_log():
                     logger.info(f"Sol motor faktörü azaltıldı: {self.left_motor_factor:.2f}")
             else:
                 # Sağ motor daha hızlıysa, sağ motoru azalt
-                self.right_motor_factor = max(0.75, self.right_motor_factor * 0.93)
+                self.right_motor_factor = max(0.8, self.right_motor_factor * 0.95)
                 if self._should_log():
                     logger.info(f"Sağ motor faktörü azaltıldı: {self.right_motor_factor:.2f}")
-            
+        
+            # Geçmişi temizle ve yeni değerlerle başla
             self.motor_speed_history['left'].clear()
             self.motor_speed_history['right'].clear()
+            
+            # Faktör değişimini logla
+            logger.info(f"Motor faktörleri - Sol: {self.left_motor_factor:.2f}, Sağ: {self.right_motor_factor:.2f}")
 
+    def _check_motor_health(self, motor_side):
+        """Motor sağlığını kontrol et"""
+        current_time = time.time()
+        motor = self.motor_health[motor_side]
+        
+        # Hata sayacını sıfırla
+        if current_time - motor['last_error_time'] > self.error_reset_time:
+            motor['errors'] = 0
+            
+        return motor['errors'] < self.max_motor_errors
+        
+    def _check_overheating(self):
+        """Aşırı ısınma kontrolü"""
+        if not self.run_start_time:
+            self.run_start_time = time.time()
+            return False
+            
+        current_time = time.time()
+        run_time = current_time - self.run_start_time
+        
+        if run_time > self.max_continuous_run_time:
+            if current_time - self.last_cooldown_time < self.overheat_cooldown_time:
+                return True
+                
+            self.last_cooldown_time = current_time
+            self.run_start_time = current_time
+            
+        return False
+        
     def _set_motor_speed(self, motor_side, direction, speed):
-        """
-        Belirtilen motoru belirtilen yön ve hızda çalıştırır.
-        Motor dengeleme faktörlerini uygular.
-        
-        Args:
-            motor_side (str): 'left' veya 'right'
-            direction (str): 'forward', 'backward' veya 'stop'
-            speed (float): Hız değeri (0-1 arası)
-        """
-        # Hız değerini sınırlandır
-        speed = min(max(0, speed), self.max_speed)
-        
-        # Motor faktörlerini uygula
-        if motor_side == 'left':
-            speed = speed * self.left_motor_factor
-            prev_speed = self.prev_left_speed
-            prev_direction = self.prev_left_direction
-            motor_in1 = self.left_motor_in1
-            motor_in2 = self.left_motor_in2
-            motor_pwm = self.left_pwm
-        else:  # 'right'
-            speed = speed * self.right_motor_factor
-            prev_speed = self.prev_right_speed
-            prev_direction = self.prev_right_direction
-            motor_in1 = self.right_motor_in1
-            motor_in2 = self.right_motor_in2
-            motor_pwm = self.right_pwm
-        
-        # Hız geçmişini güncelle
-        if direction == 'forward':
-            self.motor_speed_history[motor_side].append(speed)
-            if len(self.motor_speed_history[motor_side]) > self.max_history_length:
-                self.motor_speed_history[motor_side].pop(0)
-        
-        # Yön değişimi tespiti
-        direction_changed = prev_direction != direction and prev_direction != 'stop' and direction != 'stop'
-        
-        # Yön değişimlerinde ani geçişleri önle
-        if direction_changed:
-            current_time = time.time()
-            # İlk önce motoru durdur
-            motor_in1.off()
-            motor_in2.off()
-            motor_pwm.value = 0
+        """Güvenli motor hız kontrolü"""
+        # Aşırı ısınma kontrolü
+        if self._check_overheating():
+            logger.warning(f"Aşırı ısınma koruması aktif. Motor: {motor_side}")
+            return False
             
-            # Motorun elektromekanik olarak durması için kısa bir bekleme
-            elapsed = current_time - self.last_direction_change
-            if elapsed < self.direction_change_delay:
-                time.sleep(self.direction_change_delay - elapsed)
+        # Motor sağlığı kontrolü
+        if not self._check_motor_health(motor_side):
+            logger.error(f"Motor sağlık kontrolü başarısız: {motor_side}")
+            return False
             
-            self.last_direction_change = time.time()
-        
-        # Ramping mekanizması - hedef hıza kademeli olarak geçiş
-        target_speed = speed
-        
-        # Hız artıyor mu, azalıyor mu?
-        if target_speed > prev_speed:
-            # Hızlanma durumu - daha yavaş geçiş
-            ramped_speed = min(target_speed, prev_speed + self.max_accel)
-        else:
-            # Yavaşlama durumu - daha hızlı geçiş
-            ramped_speed = max(target_speed, prev_speed - self.max_decel)
-        
-        # Yönü ve ramping uygulanmış hızı ayarla
-        if direction == 'forward':
-            motor_in1.on()
-            motor_in2.off()
-            motor_pwm.value = ramped_speed
-        elif direction == 'backward':
-            motor_in1.off()
-            motor_in2.on()
-            motor_pwm.value = ramped_speed
-        else:  # 'stop'
-            motor_in1.off()
-            motor_in2.off()
-            motor_pwm.value = 0
-            ramped_speed = 0  # Duruş durumunda hız sıfır
-        
-        # Önceki değerleri güncelle
-        if motor_side == 'left':
-            self.prev_left_speed = ramped_speed
-            self.prev_left_direction = direction
-        else:  # 'right'
-            self.prev_right_speed = ramped_speed
-            self.prev_right_direction = direction
-        
-        # Debug log
-        if ramped_speed != speed:
-            logger.debug(f"{motor_side.capitalize()} motor ramping: {prev_speed:.2f} -> {ramped_speed:.2f} (hedef: {speed:.2f})")
+        try:
+            # Hız değerini sınırlandır
+            speed = min(max(0, speed), self.max_speed)
+            
+            # Motor faktörlerini uygula
+            if motor_side == 'left':
+                speed = speed * self.left_motor_factor
+                prev_speed = self.prev_left_speed
+                prev_direction = self.prev_left_direction
+                motor_in1 = self.left_motor_in1
+                motor_in2 = self.left_motor_in2
+                motor_pwm = self.left_pwm
+            else:  # 'right'
+                speed = speed * self.right_motor_factor
+                prev_speed = self.prev_right_speed
+                prev_direction = self.prev_right_direction
+                motor_in1 = self.right_motor_in1
+                motor_in2 = self.right_motor_in2
+                motor_pwm = self.right_pwm
+            
+            # Hız geçmişini güncelle (tüm hareketler için)
+            if direction != 'stop':
+                self.motor_speed_history[motor_side].append(speed)
+                if len(self.motor_speed_history[motor_side]) > self.max_history_length:
+                    self.motor_speed_history[motor_side].pop(0)
+            
+            # Yön değişimi tespiti
+            direction_changed = prev_direction != direction and prev_direction != 'stop' and direction != 'stop'
+            
+            # Yön değişimlerinde ani geçişleri önle
+            if direction_changed:
+                current_time = time.time()
+                # İlk önce motoru durdur
+                motor_in1.off()
+                motor_in2.off()
+                motor_pwm.value = 0
+                
+                # Motorun elektromekanik olarak durması için kısa bir bekleme
+                elapsed = current_time - self.last_direction_change
+                if elapsed < self.direction_change_delay:
+                    time.sleep(self.direction_change_delay - elapsed)
+                
+                self.last_direction_change = time.time()
+            
+            # Ramping mekanizması - hedef hıza kademeli olarak geçiş
+            target_speed = speed
+            
+            # Hız artıyor mu, azalıyor mu?
+            if target_speed > prev_speed:
+                # Hızlanma durumu - daha yavaş geçiş
+                ramped_speed = min(target_speed, prev_speed + self.max_accel)
+            else:
+                # Yavaşlama durumu - daha hızlı geçiş
+                ramped_speed = max(target_speed, prev_speed - self.max_decel)
+            
+            # Yönü ve ramping uygulanmış hızı ayarla
+            if direction == 'forward':
+                motor_in1.on()
+                motor_in2.off()
+                motor_pwm.value = ramped_speed
+            elif direction == 'backward':
+                motor_in1.off()
+                motor_in2.on()
+                motor_pwm.value = ramped_speed
+            else:  # 'stop'
+                motor_in1.off()
+                motor_in2.off()
+                motor_pwm.value = 0
+                ramped_speed = 0
+            
+            # Önceki değerleri güncelle
+            if motor_side == 'left':
+                self.prev_left_speed = ramped_speed
+                self.prev_left_direction = direction
+            else:  # 'right'
+                self.prev_right_speed = ramped_speed
+                self.prev_right_direction = direction
+            
+            # Motor durumunu güncelle
+            self.motor_states[motor_side].update({
+                'running': direction != 'stop',
+                'speed': speed,
+                'direction': direction
+            })
+            
+            return True
+            
+        except Exception as e:
+            # Hata durumunu kaydet
+            self.motor_health[motor_side]['errors'] += 1
+            self.motor_health[motor_side]['last_error_time'] = time.time()
+            logger.error(f"Motor kontrol hatası ({motor_side}): {e}")
+            return False
     
     def forward(self, speed=None):
         """
@@ -484,7 +556,7 @@ class MotorController:
     
     def follow_lane(self, center_diff, speed=None):
         """
-        Şerit takibi için araç kontrolü
+        Şerit takibi için araç kontrolü - PID ile geliştirilmiş versiyon
         """
         if speed is None:
             speed = self.default_speed
@@ -493,7 +565,6 @@ class MotorController:
         
         if center_diff is None:
             self.lost_lane_counter += 1
-            
             if self.lost_lane_counter > 10:
                 if self._should_log():
                     logger.warning("Şerit kaybedildi, durduruluyor...")
@@ -502,35 +573,34 @@ class MotorController:
             return
         else:
             self.lost_lane_counter = 0
-            
-        # PID kontrol çıktısını hesapla
-        correction = self.calculate_pid(center_diff)
         
-        # Temel hızları ayarla - sol motor için daha düşük temel hız
-        base_speed_left = speed * 0.85  # Sol motor için daha düşük temel hız
-        base_speed_right = speed * 0.9
-        turn_speed = speed * self.turn_speed_factor
+        # PID düzeltmesini hesapla
+        pid_correction = self.calculate_pid(center_diff)
         
-        # Sapma değerine göre motor hızlarını ayarla
+        # Temel hızları ayarla - eşit başlangıç hızları
+        base_speed = speed * 0.9
+        
+        # PID düzeltmesini uygula
         if abs(center_diff) < self.center_deadzone:
-            # Düz giderken bile sol motor daha yavaş
-            left_speed = base_speed_left
-            right_speed = base_speed_right
+            # Merkeze çok yakınsa eşit hız
+            left_speed = base_speed
+            right_speed = base_speed
         else:
-            if center_diff < 0:  # Sola dön
-                # Sola dönüşlerde sağ motoru daha fazla hızlandır
-                left_speed = base_speed_left - (abs(center_diff) * turn_speed)
-                right_speed = base_speed_right + (abs(center_diff) * turn_speed * 1.1)
-            else:  # Sağa dön
-                # Sağa dönüşlerde sol motoru daha az hızlandır
-                left_speed = base_speed_left + (abs(center_diff) * turn_speed * 0.9)
-                right_speed = base_speed_right - (abs(center_diff) * turn_speed)
+            # PID düzeltmesini hızlara uygula
+            correction = pid_correction * self.turn_speed_factor
+            
+            if center_diff < 0:  # Sola dönüş gerekiyor
+                left_speed = base_speed * (1 - abs(correction))
+                right_speed = base_speed * (1 + abs(correction) * 0.8)
+            else:  # Sağa dönüş gerekiyor
+                left_speed = base_speed * (1 + abs(correction) * 0.8)
+                right_speed = base_speed * (1 - abs(correction))
         
         # Hızları sınırla
         left_speed = max(min(left_speed, self.max_speed), self.min_motor_speed)
         right_speed = max(min(right_speed, self.max_speed), self.min_motor_speed)
         
-        # Motor faktörlerini güncelle
+        # Motor faktörlerini güncelle ve uygula
         self._update_motor_factors()
         
         # Motorları çalıştır
@@ -541,7 +611,7 @@ class MotorController:
         self.debug_log_counter += 1
         if self.debug_log_counter >= self.log_threshold:
             self.debug_log_counter = 0
-            logger.debug(f"Şerit takibi - Sapma: {center_diff:.2f}, Sol: {left_speed:.2f}, Sağ: {right_speed:.2f}")
+            logger.debug(f"Şerit takibi - Sapma: {center_diff:.2f}, PID: {pid_correction:.2f}, Sol: {left_speed:.2f}, Sağ: {right_speed:.2f}")
     
     def cleanup(self):
         """

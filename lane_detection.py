@@ -17,35 +17,63 @@ logger = logging.getLogger("LaneDetection")
 
 class LaneDetector:
     def __init__(self, camera_resolution=(320, 240), debug=False):
+        if not isinstance(camera_resolution, tuple) or len(camera_resolution) != 2:
+            raise ValueError("camera_resolution geçersiz format")
+            
         self.width = camera_resolution[0]
         self.height = camera_resolution[1]
         self.debug = debug
         
-        # ROI (İlgi Alanı) parametreleri
+        # ROI parametreleri - genişletildi ve doğrulama eklendi
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Geçersiz çözünürlük değerleri")
+            
         self.roi_vertices = np.array([
             [0, self.height],
-            [self.width * 0.4, self.height * 0.6],
-            [self.width * 0.6, self.height * 0.6],
+            [self.width * 0.3, self.height * 0.5],  # Daha yukarı ve geniş
+            [self.width * 0.7, self.height * 0.5],  # Daha yukarı ve geniş
             [self.width, self.height]
         ], dtype=np.int32)
         
-        # Temel filtre parametreleri
+        # Temel filtre parametreleri - hassasiyet artırıldı
         self.blur_kernel = 5
-        self.canny_low = 50
-        self.canny_high = 150
+        if self.blur_kernel % 2 == 0:  # Blur kernel tek sayı olmalı
+            self.blur_kernel += 1
+            
+        self.canny_low = 30    # Düşürüldü
+        self.canny_high = 120  # Düşürüldü
         
-        # Hough parametreleri
-        self.rho = 1
+        # Hough parametreleri - hassasiyet artırıldı ve sınırlar eklendi
+        self.rho = max(1, min(2, self.width / 320))  # Çözünürlüğe göre ayarla
         self.theta = np.pi/180
-        self.min_line_length = 20
-        self.max_line_gap = 30
+        self.min_line_length = max(15, self.height * 0.1)  # Görüntü boyutuna göre ayarla
+        self.max_line_gap = min(40, self.height * 0.2)     # Görüntü boyutuna göre ayarla
         
-        # Şerit hafızası
+        # Şerit hafızası ve yumuşatma
         self.last_left_fit = None
         self.last_right_fit = None
-        self.smooth_factor = 0.8
+        self.smooth_factor = 0.8  # Yumuşatma faktörü
+        self.max_memory_frames = 5  # Maksimum hafıza karesi
         
+        # Hata durumu için değişkenler
+        self.consecutive_detection_failures = 0
+        self.max_detection_failures = 10
+        
+        # Debug görüntüleri için sözlük
         self.debug_images = {}
+        
+    def validate_frame(self, frame):
+        """Gelen kareyi doğrula"""
+        if frame is None:
+            raise ValueError("Boş kare alındı")
+            
+        if len(frame.shape) != 3:
+            raise ValueError("Geçersiz kare formatı")
+            
+        if frame.shape[0] != self.height or frame.shape[1] != self.width:
+            raise ValueError(f"Kare boyutu uyumsuz: Beklenen {self.width}x{self.height}, Alınan {frame.shape[1]}x{frame.shape[0]}")
+            
+        return True
         
     def load_calibration(self, calibration_file):
         """
