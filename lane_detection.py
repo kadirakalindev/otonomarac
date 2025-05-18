@@ -47,6 +47,45 @@ class LaneDetector:
         
         self.debug_images = {}
         
+    def load_calibration(self, calibration_file):
+        """
+        Kalibrasyon dosyasından parametreleri yükler
+        
+        Args:
+            calibration_file (str): Kalibrasyon JSON dosyasının yolu
+        """
+        try:
+            import json
+            with open(calibration_file, 'r') as f:
+                calibration = json.load(f)
+                
+            # ROI noktalarını güncelle (eğer varsa)
+            if 'src_points' in calibration:
+                self.roi_vertices = np.array(calibration['src_points'], dtype=np.int32)
+                
+            # Filtre parametrelerini güncelle
+            if 'canny_low_threshold' in calibration:
+                self.canny_low = calibration['canny_low_threshold']
+            if 'canny_high_threshold' in calibration:
+                self.canny_high = calibration['canny_high_threshold']
+            if 'blur_kernel_size' in calibration:
+                self.blur_kernel = calibration['blur_kernel_size']
+                
+            # Hough parametrelerini güncelle
+            if 'hough_threshold' in calibration:
+                self.rho = calibration['hough_threshold']
+            if 'min_line_length' in calibration:
+                self.min_line_length = calibration['min_line_length']
+            if 'max_line_gap' in calibration:
+                self.max_line_gap = calibration['max_line_gap']
+                
+            logger.info(f"Kalibrasyon dosyası yüklendi: {calibration_file}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Kalibrasyon dosyası yüklenirken hata: {e}")
+            return False
+        
     def preprocess_image(self, image):
         """Temel görüntü ön işleme"""
         # Gri tonlamaya çevir
