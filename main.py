@@ -172,113 +172,96 @@ class OtonomArac:
         last_error_time = 0
         
         try:
+            # Kamera başlatma ve yapılandırma
+            if self.camera is None:
+                self._initialize_camera()
+                self.camera.start()
+                
+                # Kameranın dengelenmesi için bekle
+                logger.info("Kamera dengeleniyor...")
+                time.sleep(1.5)
+            
+            # FPS hesaplama değişkenlerini başlat
+            self.fps_start_time = time.time()
+            self.frame_count = 0
+            
+            # Debug modu için pencere oluştur
+            if self.debug:
+                cv2.namedWindow("Otonom Arac", cv2.WINDOW_NORMAL)
+                cv2.setWindowTitle("Otonom Arac", "Otonom Arac - Serit Tespiti")
+            
+            # Debug modunda son frame update zamanı
+            last_debug_update = 0
+            debug_frame_interval = 1.0 / self.debug_fps if self.debug_fps > 0 else 0
+            
+            # Görüntü işleme döngüsü
             while self.running:
                 try:
-                    # Kamera başlatma ve yapılandırma
-                    if self.camera is None:
-                        self._initialize_camera()
+                    # Kameradan görüntü al
+                    frame = self.camera.capture_array()
                     
-                    self.camera.start()
+                    # Görüntüyü işle ve şeritleri tespit et
+                    processed_frame, center_diff = self.lane_detector.process_frame(frame)
                     
-                    # Kameranın dengelenmesi için bekle
-                    logger.info("Kamera dengeleniyor...")
-                    time.sleep(1.5)
+                    # Şeritlere göre motoru kontrol et
+                    self.motor_controller.follow_lane(center_diff)
                     
-                    # FPS hesaplama değişkenlerini başlat
-                    self.fps_start_time = time.time()
-                    self.frame_count = 0
+                    # FPS hesapla
+                    self.frame_count += 1
+                    elapsed_time = time.time() - self.fps_start_time
+                    if elapsed_time >= 1.0:
+                        self.fps = self.frame_count / elapsed_time
+                        self.fps_start_time = time.time()
+                        self.frame_count = 0
+                        logger.debug(f"FPS: {self.fps:.1f}")
                     
-                    # Debug modu için pencere oluştur
+                    # Debug modunda görüntüyü göster
                     if self.debug:
-                        cv2.namedWindow("Otonom Arac", cv2.WINDOW_NORMAL)
-                        cv2.setWindowTitle("Otonom Arac", "Otonom Arac - Serit Tespiti")
-                    
-                    # Debug modunda son frame update zamanı
-                    last_debug_update = 0
-                    debug_frame_interval = 1.0 / self.debug_fps if self.debug_fps > 0 else 0
-                    
-                    # Görüntü işleme döngüsü
-                    while self.running:
-                        try:
-                            # Kameradan görüntü al
-                            frame = self.camera.capture_array()
+                        current_time = time.time()
+                        if current_time - last_debug_update >= debug_frame_interval:
+                            # FPS bilgisini görüntüye ekle
+                            cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", 
+                                      (processed_frame.shape[1] - 120, 30), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                             
-                            # Görüntüyü işle ve şeritleri tespit et
-                            processed_frame, center_diff = self.lane_detector.process_frame(frame)
+                            # Görüntüyü göster
+                            cv2.imshow("Otonom Arac", processed_frame)
+                            last_debug_update = current_time
                             
-                            # Şeritlere göre motoru kontrol et
-                            self.motor_controller.follow_lane(center_diff)
-                            
-                            # FPS hesapla
-                            self.frame_count += 1
-                            elapsed_time = time.time() - self.fps_start_time
-                            if elapsed_time >= 1.0:
-                                self.fps = self.frame_count / elapsed_time
-                                self.fps_start_time = time.time()
-                                self.frame_count = 0
-                                logger.debug(f"FPS: {self.fps:.1f}")
-                            
-                            # Debug modunda görüntüyü göster
-                            if self.debug:
-                                current_time = time.time()
-                                if current_time - last_debug_update >= debug_frame_interval:
-                                    # FPS bilgisini görüntüye ekle
-                                    cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", 
-                                              (processed_frame.shape[1] - 120, 30), 
-                                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                                    
-                                    # Görüntüyü göster
-                                    cv2.imshow("Otonom Arac", processed_frame)
-                                    last_debug_update = current_time
-                                    
-                                    # Tuş kontrolü
-                                    key = cv2.waitKey(1) & 0xFF
-                                    if key == ord('q'):
-                                        logger.info("Kullanıcı tarafından durduruldu")
-                                        self.running = False
-                                        break
-                                    elif key == ord('s'):
-                                        filename = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
-                                        cv2.imwrite(filename, processed_frame)
-                                        logger.info(f"Ekran görüntüsü kaydedildi: {filename}")
-                            
-                        except KeyboardInterrupt:
-                            logger.info("Kullanıcı tarafından durduruldu (CTRL+C)")
-                            self.running = False
-                            break
-                            
-                        except Exception as e:
-                            error_count += 1
-                            logger.error(f"Kare işleme hatası ({error_count}/{max_consecutive_errors}): {e}")
-                            
-                            if error_count >= max_consecutive_errors:
-                                logger.critical("Çok fazla ardışık hata! Yeniden başlatılıyor...")
+                            # Tuş kontrolü
+                            key = cv2.waitKey(1) & 0xFF
+                            if key == ord('q'):
+                                logger.info("Kullanıcı tarafından durduruldu")
+                                self.running = False
                                 break
+                            elif key == ord('s'):
+                                filename = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+                                cv2.imwrite(filename, processed_frame)
+                                logger.info(f"Ekran görüntüsü kaydedildi: {filename}")
+                    
+                except KeyboardInterrupt:
+                    logger.info("Kullanıcı tarafından durduruldu (CTRL+C)")
+                    self.running = False
+                    break
                     
                 except Exception as e:
+                    error_count += 1
                     current_time = time.time()
+                    
                     # Son hata üzerinden yeterli süre geçtiyse sayacı sıfırla
                     if current_time - last_error_time > 10.0:
                         error_count = 0
                     
-                    error_count += 1
                     last_error_time = current_time
-                    
-                    logger.error(f"Kamera hatası ({error_count}/{max_consecutive_errors}): {e}")
+                    logger.error(f"Kare işleme hatası ({error_count}/{max_consecutive_errors}): {e}")
                     
                     if error_count >= max_consecutive_errors:
-                        logger.critical("Kritik hata! Sistem yeniden başlatılıyor...")
+                        logger.critical("Çok fazla ardışık hata! Yeniden başlatılıyor...")
                         self.cleanup()
                         time.sleep(restart_delay)
                         error_count = 0
                         continue
-                
-                # İç döngüden çıkıldığında temizlik yap
-                self.cleanup()
-                if self.running:  # Hata nedeniyle çıkıldıysa yeniden başlat
-                    time.sleep(restart_delay)
-                    continue
-                
+        
         except Exception as e:
             logger.error(f"Ana döngü hatası: {e}")
         
