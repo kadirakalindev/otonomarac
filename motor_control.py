@@ -172,6 +172,7 @@ class MotorController:
         self.history_max_length = 50
         self.error_history = []
         self.pid_update_interval = 1.5  # Güncelleme aralığı azaltıldı
+        self.last_pid_update = time.time()  # PID güncelleme zamanı başlangıcı
         
         # PID ayarlama limitleri
         self.kp_min, self.kp_max = 0.3, 0.8
