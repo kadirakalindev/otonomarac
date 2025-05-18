@@ -441,7 +441,6 @@ class MotorController:
             
             if self.lost_lane_counter > 10:  # Şerit belirli süre boyunca bulunamadıysa
                 logger.warning(f"Şerit {self.lost_lane_counter} kare boyunca bulunamadı. Durduruluyor...")
-                # Şerit bulunamadığında aracı durdur veya önceki harekete devam et
                 self.stop()
                 return
                 
@@ -454,43 +453,37 @@ class MotorController:
         # PID kontrol çıktısını hesapla
         correction = self.calculate_pid(center_diff)
         
-        # Daha yumuşak dönüşler için düzeltme faktörünü azalt (aşırı ısınmayı azaltır)
-        steering_factor = 0.3  # Daha önceki 0.5 değerinden daha düşük
+        # Daha yumuşak dönüşler için düzeltme faktörünü ayarla
+        steering_factor = 0.5  # Dönüş hassasiyeti (0.3'ten 0.5'e çıkarıldı)
         
         # Motor hızlarını hesapla
-        left_speed = speed - (correction * steering_factor * speed)
-        right_speed = speed + (correction * steering_factor * speed)
+        # Düz gitme eğilimini artırmak için base_speed ekledik
+        base_speed = speed * 0.8  # Temel ileri gitme hızı
+        turn_speed = speed * 0.2  # Dönüş için kullanılacak hız
         
-        # Minimum motor hızını sağla (motorların durmasını önle)
-        if left_speed > 0:
-            left_speed = max(left_speed, self.min_motor_speed)
-        elif left_speed < 0:
-            left_speed = min(left_speed, -self.min_motor_speed)
-            
-        if right_speed > 0:
-            right_speed = max(right_speed, self.min_motor_speed)
-        elif right_speed < 0:
-            right_speed = min(right_speed, -self.min_motor_speed)
-        
-        # İleri/geri yönleri belirle
-        if left_speed >= 0:
-            left_direction = 'forward'
+        # Sapma değerine göre motor hızlarını ayarla
+        if abs(center_diff) < 0.1:  # Merkeze yakınsa düz git
+            left_speed = base_speed
+            right_speed = base_speed
         else:
-            left_direction = 'backward'
-            left_speed = abs(left_speed)
-            
-        if right_speed >= 0:
-            right_direction = 'forward'
-        else:
-            right_direction = 'backward'
-            right_speed = abs(right_speed)
+            # Dönüş hızlarını hesapla
+            if center_diff < 0:  # Sola dön
+                left_speed = base_speed - (abs(center_diff) * turn_speed)
+                right_speed = base_speed + (abs(center_diff) * turn_speed)
+            else:  # Sağa dön
+                left_speed = base_speed + (abs(center_diff) * turn_speed)
+                right_speed = base_speed - (abs(center_diff) * turn_speed)
         
-        # Motorları ayarlanan hızlarda çalıştır
-        self._set_motor_speed('left', left_direction, left_speed)
-        self._set_motor_speed('right', right_direction, right_speed)
+        # Minimum motor hızını sağla
+        left_speed = max(left_speed, self.min_motor_speed)
+        right_speed = max(right_speed, self.min_motor_speed)
         
-        # Yapılan ayarlamaları logla
-        logger.debug(f"Şerit takibi - Sapma: {center_diff:.4f}, Düzeltme: {correction:.4f}, Sol: {left_speed:.2f}, Sağ: {right_speed:.2f}")
+        # Motorları çalıştır
+        self._set_motor_speed('left', 'forward', left_speed)
+        self._set_motor_speed('right', 'forward', right_speed)
+        
+        # Debug log
+        logger.debug(f"Şerit takibi - Sapma: {center_diff:.4f}, Sol: {left_speed:.2f}, Sağ: {right_speed:.2f}")
     
     def cleanup(self):
         """
