@@ -11,6 +11,7 @@ import time
 import logging
 from gpiozero import OutputDevice, PWMOutputDevice
 import numpy as np
+import RPi.GPIO as GPIO
 
 # Log yapılandırması
 logging.basicConfig(
@@ -54,6 +55,65 @@ class MotorController:
             use_board_pins (bool): BOARD pin numaralandırmasını kullan (True) veya BCM kullan (False)
             pwm_frequency (int): PWM frekansı (Hz) - aşırı ısınmayı önlemek için düşürüldü
         """
+        # Pin numaralarını kaydet
+        self.left_motor_pins = left_motor_pins
+        self.right_motor_pins = right_motor_pins
+        self.left_pwm_pin = left_pwm_pin
+        self.right_pwm_pin = right_pwm_pin
+        
+        # Hız parametreleri
+        self.max_speed = max_speed
+        self.default_speed = default_speed
+        self.min_motor_speed = 0.15
+        
+        # Ramping parametreleri
+        self.max_accel = 0.05  # Hızlanma sınırı
+        self.max_decel = 0.08  # Yavaşlama sınırı
+        
+        # Motor faktörleri için parametreler
+        self.motor_speed_history = {'left': [], 'right': []}
+        self.calibration_threshold = 50  # Kalibrasyon için gereken minimum hareket sayısı
+        self.calibration_window = 100    # Kalibrasyon için kullanılacak hareket sayısı
+        
+        # Başlangıç motor faktörleri
+        self.left_motor_factor = 0.9
+        self.right_motor_factor = 0.9
+        
+        # PID kontrol parametreleri - viraj dönüşleri için optimize edildi
+        self.kp = 0.45   # Orantısal katsayı - artırıldı
+        self.ki = 0.001  # İntegral katsayı
+        self.kd = 0.25   # Türev katsayı - artırıldı
+        
+        # PID sınırları
+        self.kp_min, self.kp_max = 0.3, 0.6
+        self.ki_min, self.ki_max = 0.0005, 0.005
+        self.kd_min, self.kd_max = 0.15, 0.3
+        
+        # Şerit takibi için parametreler
+        self.center_deadzone = 0.05  # Merkez toleransı - azaltıldı
+        self.turn_speed_factor = 0.35  # Dönüş hızı faktörü - artırıldı
+        
+        # Adaptif PID sistemi için parametreler
+        self.use_adaptive_pid = True
+        self.error_history = []
+        self.error_history_max_size = 100
+        self.pid_update_interval = 1.5  # saniye
+        self.last_pid_update = time.time()
+        
+        # Şerit kaybedildiğinde kurtarma için değişkenler
+        self.lost_lane_counter = 0
+        self.previous_error = 0
+        
+        # Loglama için değişkenler
+        self.debug_log_counter = 0
+        self.log_threshold = 10  # Her 10 işlemde bir log
+        
+        # Mevcut motor hızları
+        self.current_speeds = {'left': 0, 'right': 0}
+        self.current_directions = {'left': 'stop', 'right': 'stop'}
+        
+        logger.info("Motor kontrol modülü başlatıldı.")
+        
         # Pin numaralarını doğrula
         if not all(isinstance(pin, int) for pin in [*left_motor_pins, *right_motor_pins, left_pwm_pin, right_pwm_pin]):
             raise ValueError("Tüm pin değerleri tam sayı olmalıdır")
@@ -67,8 +127,6 @@ class MotorController:
             raise ValueError("PWM frekansı 20-100 Hz aralığında olmalıdır")
             
         self.use_board_pins = use_board_pins
-        self.max_speed = max_speed
-        self.default_speed = default_speed
         self.min_motor_speed = 0.15  # Minimum çalışma hızı
         
         # Motor durumu izleme
@@ -153,9 +211,9 @@ class MotorController:
         self.right_motor_factor = 0.9
         
         # PID kontrol parametreleri - viraj dönüşleri için optimize edildi
-        self.kp = 0.4    # Orantısal katsayı - artırıldı
-        self.ki = 0.001  # İntegral katsayı - azaltıldı
-        self.kd = 0.2    # Türev katsayı - artırıldı
+        self.kp = 0.45   # Orantısal katsayı - artırıldı
+        self.ki = 0.001  # İntegral katsayı
+        self.kd = 0.25   # Türev katsayı - artırıldı
         
         # PID sınırları
         self.kp_min, self.kp_max = 0.3, 0.6
@@ -164,7 +222,7 @@ class MotorController:
         
         # Şerit takibi için parametreler
         self.center_deadzone = 0.05  # Merkez toleransı - azaltıldı
-        self.turn_speed_factor = 0.3  # Dönüş hızı faktörü - artırıldı
+        self.turn_speed_factor = 0.35  # Dönüş hızı faktörü - artırıldı
         
         # Adaptif PID sistemi için parametreler
         self.enable_adaptive_pid = True
@@ -214,6 +272,33 @@ class MotorController:
         self.log_interval = 1.0  # Saniyede bir log
         self.debug_log_counter = 0
         self.log_threshold = 30  # Her 30 işlemde bir debug log
+        
+        # Şerit kaybedildiğinde kurtarma için değişkenler
+        self.previous_error = 0
+        
+        # GPIO kurulumu
+        GPIO.setmode(GPIO.BOARD if use_board_pins else GPIO.BCM)
+        
+        # Motor pinlerini ayarla
+        for pin in left_motor_pins + right_motor_pins:
+            GPIO.setup(pin, GPIO.OUT)
+            GPIO.output(pin, GPIO.LOW)
+        
+        # PWM pinlerini ayarla
+        GPIO.setup(left_pwm_pin, GPIO.OUT)
+        GPIO.setup(right_pwm_pin, GPIO.OUT)
+        
+        # PWM nesnelerini oluştur
+        self.left_pwm = GPIO.PWM(left_pwm_pin, pwm_frequency)
+        self.right_pwm = GPIO.PWM(right_pwm_pin, pwm_frequency)
+        
+        # PWM'i başlat (0% duty cycle)
+        self.left_pwm.start(0)
+        self.right_pwm.start(0)
+        
+        # Mevcut motor hızları
+        self.current_speeds = {'left': 0, 'right': 0}
+        self.current_directions = {'left': 'stop', 'right': 'stop'}
         
         logger.info("Motor kontrol modülü başlatıldı.")
         logger.info(f"Adaptif PID: {self.enable_adaptive_pid}, Başlangıç PID: kp={self.kp}, ki={self.ki}, kd={self.kd}")
@@ -276,6 +361,9 @@ class MotorController:
         """
         PID kontrolü hesaplar
         """
+        # Hata değerini kaydet (kurtarma modu için)
+        self.previous_error = error
+        
         # Hata geçmişini güncelle (Adaptif PID için)
         self.error_history.append(error)
         if len(self.error_history) > self.history_max_length:
@@ -564,6 +652,7 @@ class MotorController:
             
         speed = min(speed, self.max_speed)
         
+        # Şerit kaybedildi mi kontrol et
         if center_diff is None:
             self.lost_lane_counter += 1
             if self.lost_lane_counter > 10:
@@ -638,9 +727,11 @@ class MotorController:
         
         # Virajlarda daha agresif dönüş için sapma miktarına göre ek düzeltme faktörü
         extra_correction = 0
-        if abs(center_diff) > 50:  # Büyük sapmalar için
+        if abs(center_diff) > 60:  # Çok büyük sapmalar için
+            extra_correction = 0.2
+        elif abs(center_diff) > 40:  # Büyük sapmalar için
             extra_correction = 0.15
-        elif abs(center_diff) > 30:  # Orta sapmalar için
+        elif abs(center_diff) > 20:  # Orta sapmalar için
             extra_correction = 0.1
         
         # PID düzeltmesini uygula
@@ -653,11 +744,15 @@ class MotorController:
             correction = (pid_correction * self.turn_speed_factor) + extra_correction
             
             if center_diff < 0:  # Sola dönüş gerekiyor
-                left_speed = base_speed * (1 - abs(correction) * 1.2)  # Sol motor daha yavaş
-                right_speed = base_speed * (1 + abs(correction))       # Sağ motor daha hızlı
+                # Dönüş hızını sapma miktarına göre ayarla
+                turn_intensity = min(1.5, 1.0 + abs(center_diff) / 100)
+                left_speed = base_speed * (1 - abs(correction) * turn_intensity)  # Sol motor daha yavaş
+                right_speed = base_speed * (1 + abs(correction))                 # Sağ motor daha hızlı
             else:  # Sağa dönüş gerekiyor
-                left_speed = base_speed * (1 + abs(correction))        # Sol motor daha hızlı
-                right_speed = base_speed * (1 - abs(correction) * 1.2) # Sağ motor daha yavaş
+                # Dönüş hızını sapma miktarına göre ayarla
+                turn_intensity = min(1.5, 1.0 + abs(center_diff) / 100)
+                left_speed = base_speed * (1 + abs(correction))                 # Sol motor daha hızlı
+                right_speed = base_speed * (1 - abs(correction) * turn_intensity) # Sağ motor daha yavaş
         
         # Hızları sınırla
         left_speed = max(min(left_speed, self.max_speed), self.min_motor_speed)
