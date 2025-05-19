@@ -29,7 +29,7 @@ class KameraPerspektifAyarlayici:
     """
     Kamera perspektif dönüşümü için optimize edilmiş kalibrasyon aracı
     """
-    def __init__(self, camera_resolution=(320, 240), framerate=15, camera_id=0, output_file="calibration.json"):
+    def __init__(self, camera_resolution=(320, 240), framerate=15, camera_id=0, output_file="serit_kalibrasyon.json"):
         """
         KameraPerspektifAyarlayici sınıfını başlatır.
         
@@ -371,7 +371,7 @@ def parse_arguments():
     parser.add_argument('--resolution', default='320x240', help='Kamera çözünürlüğü (GENxYÜK)')
     parser.add_argument('--fps', type=int, default=10, help='Kare hızı (daha düşük = daha az CPU kullanımı)')
     parser.add_argument('--camera', type=int, default=0, help='Kamera ID numarası')
-    parser.add_argument('--output', default='calibration.json', help='Kalibrasyon dosyası çıktı yolu')
+    parser.add_argument('--output', default='serit_kalibrasyon.json', help='Kalibrasyon dosyası çıktı yolu')
     
     return parser.parse_args()
 

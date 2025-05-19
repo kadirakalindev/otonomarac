@@ -16,6 +16,7 @@ import os
 from picamera2 import Picamera2
 from lane_detection import LaneDetector
 from motor_control import MotorController
+import numpy as np
 
 # Log yapılandırması
 logging.basicConfig(
@@ -38,7 +39,7 @@ class OtonomArac:
                  left_pwm_pin=12,             # Sol motor Enable pini
                  right_pwm_pin=32,            # Sağ motor Enable pini
                  use_board_pins=True,         # BOARD pin numaralandırması kullan
-                 calibration_file="calibration.json"):  # Kalibrasyon dosyası yolu
+                 calibration_file="serit_kalibrasyon.json"):  # Kalibrasyon dosyası yolu
         """
         OtonomArac sınıfını başlatır.
         
@@ -74,7 +75,7 @@ class OtonomArac:
             # Kalibrasyon dosyasını yükle (varsa)
             if os.path.exists(self.calibration_file):
                 logger.info(f"Kalibrasyon dosyası yükleniyor: {self.calibration_file}")
-                self.lane_detector.load_calibration(self.calibration_file)
+                self._load_calibration()
             else:
                 logger.warning(f"Kalibrasyon dosyası bulunamadı: {self.calibration_file}")
                 logger.warning("Varsayılan değerler kullanılacak.")
@@ -326,6 +327,88 @@ class OtonomArac:
         
         logger.info("Temizleme tamamlandı.")
 
+    def _load_calibration(self):
+        """
+        Kalibrasyon dosyasını yükler ve şerit tespiti için gerekli parametreleri ayarlar.
+        kalibrasyon_optimize.py tarafından oluşturulan formata uygun olarak çalışır.
+        """
+        try:
+            import json
+            with open(self.calibration_file, 'r') as f:
+                calibration = json.load(f)
+            
+            # kalibrasyon_optimize.py formatı kontrolü
+            if 'src_points' in calibration and 'dst_points' in calibration:
+                logger.info("kalibrasyon_optimize.py formatında kalibrasyon dosyası tespit edildi.")
+                
+                # Çözünürlük kontrolü
+                if 'resolution' in calibration:
+                    cal_width = calibration['resolution'].get('width', self.camera_resolution[0])
+                    cal_height = calibration['resolution'].get('height', self.camera_resolution[1])
+                    
+                    # Çözünürlük uyumsuzluğu kontrolü
+                    if cal_width != self.camera_resolution[0] or cal_height != self.camera_resolution[1]:
+                        logger.warning(f"Kalibrasyon dosyası çözünürlüğü ({cal_width}x{cal_height}) " +
+                                      f"kamera çözünürlüğü ({self.camera_resolution[0]}x{self.camera_resolution[1]}) ile uyumsuz.")
+                        logger.warning("Kalibrasyon noktaları ölçeklendirilecek.")
+                        
+                        # Ölçeklendirme faktörleri
+                        scale_x = self.camera_resolution[0] / cal_width
+                        scale_y = self.camera_resolution[1] / cal_height
+                        
+                        # Noktaları ölçeklendir
+                        src_points = calibration['src_points']
+                        for i in range(len(src_points)):
+                            src_points[i][0] *= scale_x
+                            src_points[i][1] *= scale_y
+                        
+                        dst_points = calibration['dst_points']
+                        for i in range(len(dst_points)):
+                            dst_points[i][0] *= scale_x
+                            dst_points[i][1] *= scale_y
+                    else:
+                        src_points = calibration['src_points']
+                        dst_points = calibration['dst_points']
+                else:
+                    src_points = calibration['src_points']
+                    dst_points = calibration['dst_points']
+                
+                # Şerit tespiti için ROI oluştur
+                roi_vertices = np.array([
+                    src_points[2],  # Sol alt
+                    src_points[0],  # Sol üst
+                    src_points[1],  # Sağ üst
+                    src_points[3]   # Sağ alt
+                ], dtype=np.int32)
+                
+                # Orta şerit çizgisi oluştur
+                center_line = np.array([
+                    [(src_points[2][0] + src_points[3][0]) // 2, self.camera_resolution[1]],  # Alt orta nokta
+                    [(src_points[0][0] + src_points[1][0]) // 2, (src_points[0][1] + src_points[1][1]) // 2]  # Üst orta nokta
+                ], dtype=np.int32)
+                
+                # LaneDetector'a parametreleri ayarla
+                self.lane_detector.roi_vertices = roi_vertices
+                self.lane_detector.center_line = center_line
+                
+                # Diğer parametreleri ayarla (varsayılan değerlerle)
+                self.lane_detector.canny_low = calibration.get('canny_low_threshold', 30)
+                self.lane_detector.canny_high = calibration.get('canny_high_threshold', 120)
+                self.lane_detector.blur_kernel = calibration.get('blur_kernel_size', 5)
+                self.lane_detector.min_line_length = calibration.get('min_line_length', 15)
+                self.lane_detector.max_line_gap = calibration.get('max_line_gap', 40)
+                
+                logger.info("Kalibrasyon parametreleri başarıyla yüklendi.")
+                return True
+            else:
+                # Eski format kalibrasyon dosyası, doğrudan LaneDetector'a yükle
+                logger.info("Eski format kalibrasyon dosyası tespit edildi.")
+                return self.lane_detector.load_calibration(self.calibration_file)
+                
+        except Exception as e:
+            logger.error(f"Kalibrasyon dosyası yüklenirken hata: {e}")
+            return False
+
 def parse_arguments():
     """
     Komut satırı argümanlarını işler
@@ -344,7 +427,7 @@ def parse_arguments():
     parser.add_argument('--use-bcm', action='store_true', help='BCM pin numaralandırması kullan (varsayılan: BOARD)')
     
     # Kalibrasyon dosyası için argüman ekle
-    parser.add_argument('--calibration', default='calibration.json', help='Kalibrasyon dosyası yolu')
+    parser.add_argument('--calibration', default='serit_kalibrasyon.json', help='Kalibrasyon dosyası yolu')
     
     return parser.parse_args()
 

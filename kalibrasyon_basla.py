@@ -3,7 +3,7 @@
 
 """
 Otonom Araç - Kalibrasyon Başlatma Aracı
-Bu program, kalibrasyon araçlarını ve test programlarını başlatmak için basit bir arayüz sunar.
+Bu program, kalibrasyon_optimize.py kullanarak kalibrasyon ve test işlemlerini başlatır.
 """
 
 import os
@@ -26,7 +26,7 @@ def print_header():
 def print_menu():
     """Ana menüyü yazdırır"""
     print("\nLütfen bir seçenek seçin:")
-    print("1. İnteraktif Şerit Kalibrasyonu")
+    print("1. Şerit Kalibrasyonu (kalibrasyon_optimize.py)")
     print("2. Kamera Testi (Kalibrasyon Kontrolü)")
     print("3. Motor Testi")
     print("4. Tam Sistem Testi (Şerit Takibi)")
@@ -40,9 +40,6 @@ def run_command(command):
     print("-" * 60)
     
     try:
-        # Komut çıktısını yakalamak için subprocess.Popen kullan
-        import subprocess
-        
         # Windows'ta shell=True kullan, diğer sistemlerde shell=False
         use_shell = True if os.name == 'nt' else False
         
@@ -67,13 +64,6 @@ def run_command(command):
             print("\nProgram başarıyla tamamlandı.")
         else:
             print(f"\nProgram hata kodu ile sonlandı: {return_code}")
-            
-            # cvSetMouseCallback hatası için özel mesaj
-            if "cvSetMouseCallback" in str(line):
-                print("\nÖNEMLİ: OpenCV fare işleyici hatası tespit edildi.")
-                print("Bu hata genellikle OpenCV sürüm uyumsuzluğundan kaynaklanır.")
-                print("Alternatif kalibrasyon aracını deneyebilirsiniz:")
-                print("python kalibrasyon_olustur_optimize.py --interactive")
     
     except KeyboardInterrupt:
         print("\nKullanıcı tarafından durduruldu.")
@@ -89,31 +79,13 @@ def run_command(command):
     
     input("\nDevam etmek için ENTER tuşuna basın...")
 
-def interactive_calibration():
-    """İnteraktif şerit kalibrasyonunu başlatır"""
+def optimize_calibration():
+    """Optimize edilmiş şerit kalibrasyonunu başlatır"""
     print_header()
-    print("\nİNTERAKTİF ŞERİT KALİBRASYONU")
+    print("\nŞERİT KALİBRASYONU (kalibrasyon_optimize.py)")
     print("-" * 60)
     print("Bu araç, şerit takibi için gereken kalibrasyon noktalarını belirlemenizi sağlar.")
-    print("5 adet noktayı şeritler üzerinde konumlandırmanız gerekiyor.")
-    
-    print("\nKalibrasyon modu seçin:")
-    print("1. Kamera ile kalibrasyon (Raspberry Pi)")
-    print("2. Alternatif kalibrasyon (OpenCV sorunu yaşayanlar için)")
-    print("3. Simülasyon modu (Kamera olmadan)")
-    
-    mode_choice = input("\nSeçiminiz (1-3): ")
-    
-    if mode_choice == "2":
-        print("\nAlternatif kalibrasyon aracı başlatılıyor...")
-        command = "python kalibrasyon_olustur_optimize.py --interactive"
-        run_command(command)
-        return
-    elif mode_choice == "3":
-        print("\nSimülasyon modu başlatılıyor...")
-        command = "python kalibrasyon_olustur_optimize.py --quick-mode"
-        run_command(command)
-        return
+    print("4 adet noktayı şeritler üzerinde konumlandırmanız gerekiyor.")
     
     print("\nÇözünürlük seçin:")
     print("1. Düşük (320x240) - Daha hızlı")
@@ -135,7 +107,7 @@ def interactive_calibration():
             print("Geçersiz seçenek! Lütfen 1-3 arasında bir değer girin.")
     
     output_file = "serit_kalibrasyon.json"
-    command = f"python interaktif_kalibrasyon.py --resolution {resolution} --output {output_file}"
+    command = f"python kalibrasyon_optimize.py --resolution {resolution} --output {output_file}"
     run_command(command)
 
 def camera_test():
@@ -153,19 +125,6 @@ def camera_test():
         
         if input("\nYine de devam etmek istiyor musunuz? (e/H): ").lower() != 'e':
             return
-    
-    print("\nTest modu seçin:")
-    print("1. Gerçek kamera ile test (Raspberry Pi)")
-    print("2. Simülasyon modu (Kamera olmadan)")
-    
-    mode_choice = input("\nSeçiminiz (1-2): ")
-    
-    if mode_choice == "2":
-        print("\nSimülasyon modu başlatılıyor...")
-        print("NOT: Bu mod gerçek kamera olmadan çalışır ve test görüntüsü oluşturur.")
-        command = f"python kamera_test.py --calibration {calibration_file} --debug"
-        run_command(command)
-        return
     
     print("\nÇözünürlük seçin:")
     print("1. Düşük (320x240) - Daha hızlı")
@@ -240,14 +199,13 @@ def show_help():
     print("-" * 60)
     print("\nOtonom Araç Kalibrasyon ve Test Aracı Kullanımı:")
     
-    print("\n1. İnteraktif Şerit Kalibrasyonu:")
-    print("   - Kamera görüntüsü üzerinde 5 nokta seçerek şerit takibi için kalibrasyon yapın.")
-    print("   - Noktaları şu sırayla yerleştirin:")
-    print("     1. Sol şeridin alt noktası")
-    print("     2. Sol şeridin üst noktası")
-    print("     3. Orta şeridin üst noktası (takip edilecek merkez)")
-    print("     4. Sağ şeridin üst noktası")
-    print("     5. Sağ şeridin alt noktası")
+    print("\n1. Şerit Kalibrasyonu (kalibrasyon_optimize.py):")
+    print("   - Kamera görüntüsü üzerinde 4 nokta seçerek şerit takibi için kalibrasyon yapın.")
+    print("   - Noktaları şu şekilde yerleştirin:")
+    print("     P0: Sol üst (şeridin sol üst köşesi)")
+    print("     P1: Sağ üst (şeridin sağ üst köşesi)")
+    print("     P2: Sol alt (genellikle ekranın sol alt köşesi)")
+    print("     P3: Sağ alt (genellikle ekranın sağ alt köşesi)")
     
     print("\n2. Kamera Testi:")
     print("   - Kalibrasyonun doğru çalışıp çalışmadığını kontrol edin.")
@@ -263,7 +221,7 @@ def show_help():
     print("   - Debug modunda görsel geri bildirim alabilirsiniz.")
     
     print("\nÖnerilen Kalibrasyon Adımları:")
-    print("1. İnteraktif Şerit Kalibrasyonu yapın.")
+    print("1. kalibrasyon_optimize.py ile şerit kalibrasyonu yapın.")
     print("2. Kamera Testi ile kalibrasyonu kontrol edin.")
     print("3. Motor Testi ile motorların doğru çalıştığını doğrulayın.")
     print("4. Tam Sistem Testi ile şerit takibini test edin.")
@@ -273,11 +231,11 @@ def show_help():
 def main():
     """Ana program"""
     parser = argparse.ArgumentParser(description="Otonom Araç Kalibrasyon ve Test Aracı")
-    parser.add_argument("--no-menu", action="store_true", help="Menüyü gösterme, doğrudan interaktif kalibrasyonu başlat")
+    parser.add_argument("--no-menu", action="store_true", help="Menüyü gösterme, doğrudan kalibrasyon aracını başlat")
     args = parser.parse_args()
     
     if args.no_menu:
-        interactive_calibration()
+        optimize_calibration()
         return
     
     while True:
@@ -287,7 +245,7 @@ def main():
         choice = input()
         
         if choice == "1":
-            interactive_calibration()
+            optimize_calibration()
         elif choice == "2":
             camera_test()
         elif choice == "3":
