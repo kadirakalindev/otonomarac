@@ -2,114 +2,363 @@
 # -*- coding: utf-8 -*-
 
 """
-Otonom Araç - Motor Yön Testi
-Bu program motorların yönlerini test etmek için kullanılır.
-Her motor sırayla 5 saniye ileri, 5 saniye geri çalıştırılır.
+Otonom Araç - Motor Test Programı
+Bu program, motorların doğru çalışıp çalışmadığını test etmek için kullanılır.
+Her motor sırayla ileri ve geri yönde çalıştırılır.
 """
 
 import time
-import logging
-from motor_control import MotorController
+import sys
+import argparse
+import RPi.GPIO as GPIO
+import signal
 
-# Log yapılandırması
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("MotorTest")
-
-def test_motor(motor_controller, motor_name, test_duration=5.0, speed=0.4):
-    """
-    Belirtilen motoru test eder
+class MotorTest:
+    def __init__(self, left_pins=(17, 27), right_pins=(22, 23), pwm_pins=(13, 12), frequency=100):
+        """Motor test sınıfını başlatır"""
+        self.left_forward_pin, self.left_backward_pin = left_pins
+        self.right_forward_pin, self.right_backward_pin = right_pins
+        self.left_pwm_pin, self.right_pwm_pin = pwm_pins
+        self.frequency = frequency
+        
+        self.left_pwm = None
+        self.right_pwm = None
+        
+        # GPIO'yu başlat
+        self._initialize_gpio()
+        
+        # Ctrl+C sinyalini yakala
+        signal.signal(signal.SIGINT, self._signal_handler)
     
-    Args:
-        motor_controller: Motor kontrol nesnesi
-        motor_name (str): Motor adı ('left' veya 'right')
-        test_duration (float): Test süresi (saniye)
-        speed (float): Test hızı (0-1 arası)
-    """
-    # Motoru ileri yönde çalıştır
-    logger.info(f"{motor_name.upper()} motor ileri yönde test ediliyor...")
-    print(f"\n{motor_name.upper()} MOTOR İLERİ >>>>>>")
+    def _signal_handler(self, sig, frame):
+        """Ctrl+C sinyalini yakalar ve temiz bir şekilde çıkış yapar"""
+        print("\nProgram sonlandırılıyor...")
+        self.cleanup()
+        sys.exit(0)
     
-    if motor_name == 'left':
-        motor_controller._set_motor_speed('left', 'forward', speed)
-        motor_controller._set_motor_speed('right', 'stop', 0)
-    else:
-        motor_controller._set_motor_speed('right', 'forward', speed)
-        motor_controller._set_motor_speed('left', 'stop', 0)
+    def _initialize_gpio(self):
+        """GPIO pinlerini başlatır"""
+        # GPIO modunu ayarla
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        
+        # Pin modlarını ayarla
+        GPIO.setup(self.left_forward_pin, GPIO.OUT)
+        GPIO.setup(self.left_backward_pin, GPIO.OUT)
+        GPIO.setup(self.right_forward_pin, GPIO.OUT)
+        GPIO.setup(self.right_backward_pin, GPIO.OUT)
+        GPIO.setup(self.left_pwm_pin, GPIO.OUT)
+        GPIO.setup(self.right_pwm_pin, GPIO.OUT)
+        
+        # PWM nesnelerini oluştur
+        self.left_pwm = GPIO.PWM(self.left_pwm_pin, self.frequency)
+        self.right_pwm = GPIO.PWM(self.right_pwm_pin, self.frequency)
+        
+        # PWM'leri başlat (0% duty cycle ile)
+        self.left_pwm.start(0)
+        self.right_pwm.start(0)
+        
+        # Tüm çıkışları sıfırla
+        self._stop_all()
+        
+        print("GPIO başlatıldı.")
     
-    time.sleep(test_duration)
+    def _stop_all(self):
+        """Tüm motor çıkışlarını durdurur"""
+        GPIO.output(self.left_forward_pin, GPIO.LOW)
+        GPIO.output(self.left_backward_pin, GPIO.LOW)
+        GPIO.output(self.right_forward_pin, GPIO.LOW)
+        GPIO.output(self.right_backward_pin, GPIO.LOW)
+        self.left_pwm.ChangeDutyCycle(0)
+        self.right_pwm.ChangeDutyCycle(0)
     
-    # Motoru durdur
-    motor_controller.stop()
-    time.sleep(1)  # Kısa bir duraklama
+    def _set_left_motor(self, direction, speed):
+        """Sol motoru ayarlar
+        
+        Args:
+            direction: Yön (1: ileri, -1: geri, 0: dur)
+            speed: Hız (0-100)
+        """
+        if direction == 1:  # İleri
+            GPIO.output(self.left_forward_pin, GPIO.HIGH)
+            GPIO.output(self.left_backward_pin, GPIO.LOW)
+        elif direction == -1:  # Geri
+            GPIO.output(self.left_forward_pin, GPIO.LOW)
+            GPIO.output(self.left_backward_pin, GPIO.HIGH)
+        else:  # Dur
+            GPIO.output(self.left_forward_pin, GPIO.LOW)
+            GPIO.output(self.left_backward_pin, GPIO.LOW)
+        
+        self.left_pwm.ChangeDutyCycle(speed)
     
-    # Motoru geri yönde çalıştır
-    logger.info(f"{motor_name.upper()} motor geri yönde test ediliyor...")
-    print(f"{motor_name.upper()} MOTOR GERİ <<<<<<")
+    def _set_right_motor(self, direction, speed):
+        """Sağ motoru ayarlar
+        
+        Args:
+            direction: Yön (1: ileri, -1: geri, 0: dur)
+            speed: Hız (0-100)
+        """
+        if direction == 1:  # İleri
+            GPIO.output(self.right_forward_pin, GPIO.HIGH)
+            GPIO.output(self.right_backward_pin, GPIO.LOW)
+        elif direction == -1:  # Geri
+            GPIO.output(self.right_forward_pin, GPIO.LOW)
+            GPIO.output(self.right_backward_pin, GPIO.HIGH)
+        else:  # Dur
+            GPIO.output(self.right_forward_pin, GPIO.LOW)
+            GPIO.output(self.right_backward_pin, GPIO.LOW)
+        
+        self.right_pwm.ChangeDutyCycle(speed)
     
-    if motor_name == 'left':
-        motor_controller._set_motor_speed('left', 'backward', speed)
-        motor_controller._set_motor_speed('right', 'stop', 0)
-    else:
-        motor_controller._set_motor_speed('right', 'backward', speed)
-        motor_controller._set_motor_speed('left', 'stop', 0)
+    def test_motors(self, speed=50, duration=2.0):
+        """Motorları test eder
+        
+        Args:
+            speed: Test hızı (0-100)
+            duration: Her test adımının süresi (saniye)
+        """
+        try:
+            print("\nMotor testi başlatılıyor...")
+            print(f"Test hızı: %{speed}, Süre: {duration} saniye")
+            
+            # Sol motor ileri
+            print("\n1. Sol motor ileri")
+            self._set_left_motor(1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            # Sol motor geri
+            print("2. Sol motor geri")
+            self._set_left_motor(-1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            # Sağ motor ileri
+            print("3. Sağ motor ileri")
+            self._set_right_motor(1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            # Sağ motor geri
+            print("4. Sağ motor geri")
+            self._set_right_motor(-1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            # Her iki motor ileri
+            print("5. Her iki motor ileri")
+            self._set_left_motor(1, speed)
+            self._set_right_motor(1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            # Her iki motor geri
+            print("6. Her iki motor geri")
+            self._set_left_motor(-1, speed)
+            self._set_right_motor(-1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            # Sol ileri, sağ geri (yerinde dönüş)
+            print("7. Sol ileri, sağ geri (yerinde sola dönüş)")
+            self._set_left_motor(1, speed)
+            self._set_right_motor(-1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            # Sol geri, sağ ileri (yerinde dönüş)
+            print("8. Sol geri, sağ ileri (yerinde sağa dönüş)")
+            self._set_left_motor(-1, speed)
+            self._set_right_motor(1, speed)
+            time.sleep(duration)
+            self._stop_all()
+            
+            print("\nMotor testi tamamlandı.")
+            
+        except Exception as e:
+            print(f"Hata: {e}")
+        finally:
+            self._stop_all()
     
-    time.sleep(test_duration)
+    def interactive_test(self):
+        """Etkileşimli motor testi"""
+        print("\nEtkileşimli motor testi başlatılıyor...")
+        print("Kontroller:")
+        print("  w: İleri")
+        print("  s: Geri")
+        print("  a: Sol")
+        print("  d: Sağ")
+        print("  q: Sol yerinde dönüş")
+        print("  e: Sağ yerinde dönüş")
+        print("  x: Dur")
+        print("  +: Hızı artır")
+        print("  -: Hızı azalt")
+        print("  0-9: Hızı ayarla (0-90%)")
+        print("  ESC: Çıkış")
+        
+        import msvcrt  # Windows için tuş okuma
+        
+        speed = 50
+        
+        try:
+            while True:
+                print(f"\rHız: %{speed} | Komut bekliyor...", end="")
+                
+                if msvcrt.kbhit():
+                    key = msvcrt.getch().decode('utf-8').lower()
+                    
+                    if key == '\x1b':  # ESC
+                        break
+                    elif key == 'w':  # İleri
+                        print(f"\rİleri (%{speed})           ")
+                        self._set_left_motor(1, speed)
+                        self._set_right_motor(1, speed)
+                    elif key == 's':  # Geri
+                        print(f"\rGeri (%{speed})            ")
+                        self._set_left_motor(-1, speed)
+                        self._set_right_motor(-1, speed)
+                    elif key == 'a':  # Sol
+                        print(f"\rSol (%{speed})             ")
+                        self._set_left_motor(0, 0)
+                        self._set_right_motor(1, speed)
+                    elif key == 'd':  # Sağ
+                        print(f"\rSağ (%{speed})             ")
+                        self._set_left_motor(1, speed)
+                        self._set_right_motor(0, 0)
+                    elif key == 'q':  # Sol yerinde dönüş
+                        print(f"\rSol yerinde dönüş (%{speed})")
+                        self._set_left_motor(-1, speed)
+                        self._set_right_motor(1, speed)
+                    elif key == 'e':  # Sağ yerinde dönüş
+                        print(f"\rSağ yerinde dönüş (%{speed})")
+                        self._set_left_motor(1, speed)
+                        self._set_right_motor(-1, speed)
+                    elif key == 'x':  # Dur
+                        print("\rDur                      ")
+                        self._stop_all()
+                    elif key == '+':  # Hızı artır
+                        speed = min(speed + 10, 100)
+                        print(f"\rHız: %{speed}              ")
+                    elif key == '-':  # Hızı azalt
+                        speed = max(speed - 10, 10)
+                        print(f"\rHız: %{speed}              ")
+                    elif key.isdigit():  # Hızı ayarla
+                        speed = int(key) * 10
+                        if speed == 0:
+                            speed = 10
+                        print(f"\rHız: %{speed}              ")
+                
+                time.sleep(0.1)
+                
+        except Exception as e:
+            print(f"\nHata: {e}")
+        finally:
+            self._stop_all()
+            print("\nEtkileşimli test sonlandırıldı.")
     
-    # Motoru durdur
-    motor_controller.stop()
-    time.sleep(1)  # Kısa bir duraklama
+    def cleanup(self):
+        """GPIO kaynaklarını temizler"""
+        self._stop_all()
+        if self.left_pwm:
+            self.left_pwm.stop()
+        if self.right_pwm:
+            self.right_pwm.stop()
+        GPIO.cleanup()
+        print("GPIO temizlendi.")
 
 def main():
-    """
-    Ana test programı
-    """
+    """Ana program"""
+    parser = argparse.ArgumentParser(description="Otonom Araç Motor Test Programı")
+    parser.add_argument("--speed", type=int, default=50, help="Motor test hızı (0-100)")
+    parser.add_argument("--duration", type=float, default=2.0, help="Her test adımının süresi (saniye)")
+    parser.add_argument("--interactive", action="store_true", help="Etkileşimli test modunu aktifleştir")
+    parser.add_argument("--left-pins", type=int, nargs=2, default=[17, 27], help="Sol motor pin numaraları (ileri geri)")
+    parser.add_argument("--right-pins", type=int, nargs=2, default=[22, 23], help="Sağ motor pin numaraları (ileri geri)")
+    parser.add_argument("--pwm-pins", type=int, nargs=2, default=[13, 12], help="PWM pin numaraları (sol sağ)")
+    args = parser.parse_args()
+    
     try:
-        # Motor kontrolcüsünü başlat
-        # NOT: Pin numaralarını kendi bağlantılarınıza göre değiştirin
-        motor_controller = MotorController(
-            left_motor_pins=(16, 18),    # Sol motor için (IN1, IN2)
-            right_motor_pins=(36, 38),   # Sağ motor için (IN1, IN2)
-            left_pwm_pin=12,             # Sol motor PWM
-            right_pwm_pin=32,            # Sağ motor PWM
-            max_speed=0.6,               # Maksimum hızı sınırla
-            default_speed=0.4            # Test için varsayılan hız
+        # GPIO pinlerini ayarla
+        tester = MotorTest(
+            left_pins=tuple(args.left_pins),
+            right_pins=tuple(args.right_pins),
+            pwm_pins=tuple(args.pwm_pins)
         )
         
-        print("\nMOTOR YÖN TESTİ BAŞLIYOR")
-        print("------------------------")
-        print("Her motor 5 saniye ileri, 5 saniye geri çalışacak.")
-        print("Motorların dönüş yönlerini kontrol edin.")
-        print("Test sırasında herhangi bir tuşa basarak testi iptal edebilirsiniz.")
-        input("\nBaşlamak için ENTER tuşuna basın...")
+        # Test modunu seç
+        if args.interactive:
+            tester.interactive_test()
+        else:
+            tester.test_motors(speed=args.speed, duration=args.duration)
         
-        # Sol motoru test et
-        test_motor(motor_controller, 'left')
+        # Temizlik
+        tester.cleanup()
         
-        print("\nSol motor testi tamamlandı.")
-        input("Sağ motor testine başlamak için ENTER tuşuna basın...")
-        
-        # Sağ motoru test et
-        test_motor(motor_controller, 'right')
-        
-        print("\nTest tamamlandı!")
-        print("\nSONUÇLARI KONTROL EDİN:")
-        print("1. Her iki motor da ileri komutunda ileri gitti mi?")
-        print("2. Her iki motor da geri komutunda geri gitti mi?")
-        print("\nEğer motorlardan biri ters çalışıyorsa:")
-        print("- O motorun IN1 ve IN2 kablolarının yerini değiştirin")
-        print("- Veya motor_control.py dosyasında ilgili motorun yön pinlerini yazılımsal olarak değiştirin")
-        
-    except KeyboardInterrupt:
-        print("\nTest kullanıcı tarafından durduruldu.")
     except Exception as e:
-        logger.error(f"Test hatası: {e}")
-    finally:
-        if 'motor_controller' in locals():
-            motor_controller.cleanup()
-            logger.info("Motor kontrol kaynakları temizlendi.")
+        print(f"Hata: {e}")
+        # GPIO'yu temizlemeye çalış
+        try:
+            GPIO.cleanup()
+        except:
+            pass
 
 if __name__ == "__main__":
+    print("\nOTONOM ARAÇ MOTOR TEST PROGRAMI")
+    print("------------------------------")
+    
+    # Platformu kontrol et
+    try:
+        import RPi.GPIO
+        print("Raspberry Pi GPIO modülü bulundu.")
+    except ImportError:
+        print("UYARI: RPi.GPIO modülü bulunamadı!")
+        print("Bu program bir Raspberry Pi üzerinde çalıştırılmalıdır.")
+        print("Simülasyon modunda devam edilecek.")
+        
+        # RPi.GPIO modülünü simüle et
+        class GPIO:
+            BCM = "BCM"
+            OUT = "OUT"
+            IN = "IN"
+            HIGH = 1
+            LOW = 0
+            
+            @staticmethod
+            def setmode(mode):
+                print(f"GPIO.setmode({mode})")
+            
+            @staticmethod
+            def setwarnings(flag):
+                print(f"GPIO.setwarnings({flag})")
+            
+            @staticmethod
+            def setup(pin, mode):
+                print(f"GPIO.setup({pin}, {mode})")
+            
+            @staticmethod
+            def output(pin, value):
+                print(f"GPIO.output({pin}, {value})")
+            
+            @staticmethod
+            def cleanup():
+                print("GPIO.cleanup()")
+            
+            class PWM:
+                def __init__(self, pin, freq):
+                    self.pin = pin
+                    self.freq = freq
+                    print(f"PWM({pin}, {freq})")
+                
+                def start(self, dc):
+                    print(f"PWM.start({dc})")
+                
+                def ChangeDutyCycle(self, dc):
+                    print(f"PWM.ChangeDutyCycle({dc})")
+                
+                def stop(self):
+                    print("PWM.stop()")
+        
+        # GPIO modülünü değiştir
+        sys.modules['RPi.GPIO'] = GPIO
+    
     main() 
