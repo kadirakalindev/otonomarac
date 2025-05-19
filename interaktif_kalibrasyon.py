@@ -263,8 +263,21 @@ class InteraktifKalibrasyon:
             self._initialize_camera()
             
             # Pencere oluştur ve fare olaylarını bağla
-            cv2.namedWindow(self.window_name)
-            cv2.setMouseCallback(self.window_name, self._mouse_callback)
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            
+            # Mouse callback fonksiyonunu güvenli bir şekilde bağla
+            try:
+                cv2.setMouseCallback(self.window_name, self._mouse_callback)
+            except Exception as e:
+                logger.error(f"Mouse callback hatası: {e}")
+                # Alternatif yöntem deneyin
+                try:
+                    cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+                    cv2.setMouseCallback(self.window_name, lambda event, x, y, flags, param: 
+                                      self._mouse_callback(event, x, y, flags, param))
+                except Exception as e:
+                    logger.error(f"Alternatif mouse callback de başarısız: {e}")
+                    print("UYARI: Fare etkileşimi çalışmıyor. Kalibrasyon için varsayılan değerler kullanılacak.")
             
             logger.info("Kalibrasyon arayüzü hazır. Noktaları konumlandırın.")
             logger.info("Kaydetmek için 'S', sıfırlamak için 'R', çıkmak için 'ESC' tuşuna basın.")

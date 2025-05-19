@@ -40,18 +40,52 @@ def run_command(command):
     print("-" * 60)
     
     try:
-        process = subprocess.Popen(command, shell=True)
-        process.wait()
+        # Komut çıktısını yakalamak için subprocess.Popen kullan
+        import subprocess
         
-        if process.returncode == 0:
+        # Windows'ta shell=True kullan, diğer sistemlerde shell=False
+        use_shell = True if os.name == 'nt' else False
+        
+        # Hata çıktısını da standart çıktıya yönlendir
+        process = subprocess.Popen(
+            command, 
+            shell=use_shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1
+        )
+        
+        # Çıktıyı gerçek zamanlı olarak göster
+        for line in iter(process.stdout.readline, ''):
+            print(line.strip())
+        
+        process.stdout.close()
+        return_code = process.wait()
+        
+        if return_code == 0:
             print("\nProgram başarıyla tamamlandı.")
         else:
-            print(f"\nProgram hata kodu ile sonlandı: {process.returncode}")
+            print(f"\nProgram hata kodu ile sonlandı: {return_code}")
+            
+            # cvSetMouseCallback hatası için özel mesaj
+            if "cvSetMouseCallback" in str(line):
+                print("\nÖNEMLİ: OpenCV fare işleyici hatası tespit edildi.")
+                print("Bu hata genellikle OpenCV sürüm uyumsuzluğundan kaynaklanır.")
+                print("Alternatif kalibrasyon aracını deneyebilirsiniz:")
+                print("python kalibrasyon_olustur_optimize.py --interactive")
     
     except KeyboardInterrupt:
         print("\nKullanıcı tarafından durduruldu.")
     except Exception as e:
         print(f"\nHata: {e}")
+        
+        # Özel hata mesajları
+        if "ModuleNotFoundError" in str(e) and "picamera2" in str(e):
+            print("\nÖNEMLİ: picamera2 modülü bulunamadı.")
+            print("Bu modül Raspberry Pi için gereklidir.")
+            print("Yüklemek için: pip install picamera2")
+            print("Veya simülasyon modunu kullanabilirsiniz.")
     
     input("\nDevam etmek için ENTER tuşuna basın...")
 
@@ -62,6 +96,25 @@ def interactive_calibration():
     print("-" * 60)
     print("Bu araç, şerit takibi için gereken kalibrasyon noktalarını belirlemenizi sağlar.")
     print("5 adet noktayı şeritler üzerinde konumlandırmanız gerekiyor.")
+    
+    print("\nKalibrasyon modu seçin:")
+    print("1. Kamera ile kalibrasyon (Raspberry Pi)")
+    print("2. Alternatif kalibrasyon (OpenCV sorunu yaşayanlar için)")
+    print("3. Simülasyon modu (Kamera olmadan)")
+    
+    mode_choice = input("\nSeçiminiz (1-3): ")
+    
+    if mode_choice == "2":
+        print("\nAlternatif kalibrasyon aracı başlatılıyor...")
+        command = "python kalibrasyon_olustur_optimize.py --interactive"
+        run_command(command)
+        return
+    elif mode_choice == "3":
+        print("\nSimülasyon modu başlatılıyor...")
+        command = "python kalibrasyon_olustur_optimize.py --quick-mode"
+        run_command(command)
+        return
+    
     print("\nÇözünürlük seçin:")
     print("1. Düşük (320x240) - Daha hızlı")
     print("2. Orta (640x480) - Önerilen")
@@ -100,6 +153,19 @@ def camera_test():
         
         if input("\nYine de devam etmek istiyor musunuz? (e/H): ").lower() != 'e':
             return
+    
+    print("\nTest modu seçin:")
+    print("1. Gerçek kamera ile test (Raspberry Pi)")
+    print("2. Simülasyon modu (Kamera olmadan)")
+    
+    mode_choice = input("\nSeçiminiz (1-2): ")
+    
+    if mode_choice == "2":
+        print("\nSimülasyon modu başlatılıyor...")
+        print("NOT: Bu mod gerçek kamera olmadan çalışır ve test görüntüsü oluşturur.")
+        command = f"python kamera_test.py --calibration {calibration_file} --debug"
+        run_command(command)
+        return
     
     print("\nÇözünürlük seçin:")
     print("1. Düşük (320x240) - Daha hızlı")

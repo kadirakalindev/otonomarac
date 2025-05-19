@@ -1,145 +1,155 @@
 # Otonom Araç Projesi
 
-Bu proje, MEB Robot Yarışmaları için geliştirilen bir otonom araç yazılımıdır. Şerit takibi, trafik işareti tanıma, sollama ve park etme gibi görevleri gerçekleştirir.
+Bu proje, şerit takibi yapabilen bir otonom araç prototipi geliştirmek için tasarlanmıştır. Raspberry Pi tabanlı bir robot aracın kamera kullanarak şeritleri tespit etmesi ve bu şeritleri takip etmesi amaçlanmaktadır.
 
-## Özellikler
+## Proje Bileşenleri
 
-- Şerit algılama ve takibi
-- PID kontrol ile hassas motor kontrolü
-- Modüler ve optimize edilmiş yapı
-- Raspberry Pi 5 ve Raspberry Pi Camera 3 uyumluluğu
+### Donanım Gereksinimleri
 
-## Donanım Gereksinimleri
-
-- Raspberry Pi 5 (8GB RAM)
-- Raspberry Pi Camera 3
-- L298N Motor Sürücü
+- Raspberry Pi (3B+ veya 4B önerilir)
+- Pi Kamera veya USB Kamera
+- Motor Sürücü Kartı (L298N veya benzeri)
 - 2 adet DC Motor
-- 5V 5A Voltaj Regülatörü
-- Li-Po Pil
+- Güç Kaynağı (Powerbank veya Pil Paketi)
+- Şasi ve Tekerlekler
+- Jumper Kablolar
+
+### Yazılım Bileşenleri
+
+1. **Motor Kontrolü**: DC motorların hız ve yön kontrolü
+2. **Şerit Tespiti**: Kamera görüntüsünden şeritleri tespit etme
+3. **PID Kontrolü**: Şerit takibi için hassas kontrol algoritması
+4. **Kalibrasyon Araçları**: Kamera ve şerit tespiti için kalibrasyon
+5. **Test Araçları**: Bileşenlerin test edilmesi için yardımcı programlar
 
 ## Kurulum
 
-### 1. Raspberry Pi OS Kurulumu
-
-Raspberry Pi 5 üzerine son sürüm Raspberry Pi OS'u kurun:
+### Bağımlılıkları Yükleme
 
 ```bash
-# Sistemi güncelleyin
-sudo apt update
-sudo apt full-upgrade -y
-
-# Gerekli paketleri yükleyin
-sudo apt install -y python3-pip python3-dev git cmake build-essential
+pip install -r requirements.txt
 ```
 
-### 2. Gerekli Kütüphanelerin Kurulumu
+### GPIO Pin Yapılandırması
 
-```bash
-# OpenCV ve temel kütüphaneler
-sudo apt install -y python3-opencv
-pip3 install opencv-contrib-python
-pip3 install numpy matplotlib
+Varsayılan GPIO pin yapılandırması:
 
-# Picamera2 (Raspberry Pi Camera 3 için)
-sudo apt install -y python3-picamera2
+- Sol Motor İleri: GPIO 17
+- Sol Motor Geri: GPIO 27
+- Sağ Motor İleri: GPIO 22
+- Sağ Motor Geri: GPIO 23
+- Sol Motor PWM: GPIO 13
+- Sağ Motor PWM: GPIO 12
 
-# GPIO kütüphaneleri
-sudo apt install -y python3-gpiozero
-sudo systemctl enable pigpiod
-sudo systemctl start pigpiod
-
-# Diğer gereksinimler
-pip3 install simple-pid
-```
-
-### 3. Projeyi İndirme
-
-```bash
-# Projeyi klonlayın
-git clone https://github.com/kullanici/otonomarac.git
-cd otonomarac
-```
+Bu pinleri kendi donanım yapılandırmanıza göre değiştirebilirsiniz.
 
 ## Kullanım
 
-### Temel Kullanım
+### Kalibrasyon Başlatma Aracı
+
+Kalibrasyon ve test araçlarını kullanmak için başlatma aracını çalıştırın:
 
 ```bash
-# Temel çalıştırma
-python3 main.py
-
-# Hata ayıklama modunda çalıştırma
-python3 main.py --debug
-
-# Farklı çözünürlükte çalıştırma
-python3 main.py --resolution 320x240 --fps 60
+python kalibrasyon_basla.py
 ```
 
-### Pin Konfigürasyonu
+Bu araç size aşağıdaki seçenekleri sunar:
 
-Varsayılan olarak kullanılan GPIO pinleri:
-- Sol motor: GPIO 17 (ileri), GPIO 18 (geri)
-- Sağ motor: GPIO 22 (ileri), GPIO 23 (geri)
+1. **İnteraktif Şerit Kalibrasyonu**: Kamera görüntüsü üzerinde 5 nokta seçerek şerit takibi için kalibrasyon yapın.
+2. **Kamera Testi**: Kalibrasyonun doğru çalışıp çalışmadığını kontrol edin.
+3. **Motor Testi**: Motorların doğru çalışıp çalışmadığını test edin.
+4. **Tam Sistem Testi**: Şerit takibi ve motor kontrolünü birlikte test edin.
+5. **Yardım ve Bilgi**: Kullanım talimatları ve ipuçları.
 
-Farklı pin numaraları kullanmak için:
+### İnteraktif Şerit Kalibrasyonu
+
+Şerit takibi için kamera kalibrasyonu yapmak için:
 
 ```bash
-python3 main.py --left-motor 5 6 --right-motor 13 19
+python interaktif_kalibrasyon.py --resolution 640x480 --output serit_kalibrasyon.json
 ```
 
-L298N motor sürücüsü için PWM pinleri belirtmek için:
+Kalibrasyon sırasında şeritler üzerinde 5 nokta seçmeniz gerekiyor:
+1. Sol şeridin alt noktası
+2. Sol şeridin üst noktası
+3. Orta şeridin üst noktası (takip edilecek merkez)
+4. Sağ şeridin üst noktası
+5. Sağ şeridin alt noktası
+
+### Kamera Testi
+
+Kamera ve şerit tespitini test etmek için:
 
 ```bash
-python3 main.py --left-pwm 12 --right-pwm 16
+python kamera_test.py --resolution 640x480 --calibration serit_kalibrasyon.json --debug
 ```
 
-## Kalibrasyon
+### Motor Testi
 
-Şerit tespit algoritması, kameranın pozisyonuna ve parkurun ışık koşullarına göre kalibre edilmelidir. Kalibrasyon için `lane_detection.py` dosyasında şu parametreleri ayarlayabilirsiniz:
+Motorların doğru çalışıp çalışmadığını test etmek için:
 
-- `blur_kernel_size`: Gürültü azaltma için Gaussian blur kernel boyutu
-- `canny_low_threshold` ve `canny_high_threshold`: Kenar tespiti için eşik değerleri
-- `src_points` ve `dst_points`: Perspektif dönüşümü için kaynak ve hedef noktalar
+```bash
+python motor_test.py --interactive
+```
 
-## Motor Kontrolü
+veya otomatik test için:
 
-Motor davranışını ayarlamak için `motor_control.py` dosyasında PID parametrelerini düzenleyebilirsiniz:
+```bash
+python motor_test.py --speed 50 --duration 2.0
+```
 
-- `kp`: Orantısal katsayı (tepki hızı)
-- `ki`: İntegral katsayı (birikmiş hata)
-- `kd`: Türev katsayı (aşırı tepkiyi önler)
+### Tam Sistem Testi
+
+Şerit takibi ve motor kontrolünü birlikte test etmek için:
+
+```bash
+python main.py --debug --calibration serit_kalibrasyon.json
+```
+
+## PID Parametreleri
+
+Şerit takibi için PID parametreleri `motor_control.py` dosyasında ayarlanabilir:
+
+- `kp`: Orantısal katsayı (varsayılan: 0.3)
+- `ki`: İntegral katsayısı (varsayılan: 0.0005)
+- `kd`: Türev katsayısı (varsayılan: 0.15)
 
 ## Sorun Giderme
 
-### Kamera Görüntüsü Alınamıyor
+### Kamera Sorunları
 
-```bash
-# Kameranın doğru bağlandığını kontrol edin
-vcgencmd get_camera
+- Kamera başlatılamazsa, bağlantıları kontrol edin.
+- Raspberry Pi'da kamera arabiriminin etkinleştirildiğinden emin olun: `sudo raspi-config`
+- USB kamera kullanıyorsanız, doğru kamera ID'sini belirtin.
 
-# Picamera2'nin yüklü olduğunu doğrulayın
-pip3 list | grep picamera2
-```
+### Motor Sorunları
 
-### Motor Kontrolü Çalışmıyor
+- Motorlar çalışmıyorsa, pin bağlantılarını kontrol edin.
+- Motor sürücü kartının güç kaynağını kontrol edin.
+- `motor_test.py` ile motorları test edin.
 
-```bash
-# GPIO servisinin çalıştığını kontrol edin
-systemctl status pigpiod
+### Şerit Tespit Sorunları
 
-# Pin numaralarını kontrol edin
-gpio readall
-```
+- Işık koşullarının yeterli olduğundan emin olun.
+- Kamera kalibrasyonunu yeniden yapın.
+- Canny ve Hough parametrelerini ayarlayın.
 
-## Katkıda Bulunma
+## Geliştirme
 
-Projede iyileştirme yapmak veya hata raporlamak için lütfen bir issue açın veya pull request gönderin.
+Projeyi geliştirmek için aşağıdaki dosyaları inceleyebilirsiniz:
+
+- `motor_control.py`: Motor kontrolü ve PID algoritması
+- `lane_detection.py`: Şerit tespiti algoritması
+- `main.py`: Ana program döngüsü
 
 ## Lisans
 
-Bu proje MIT lisansı altında lisanslanmıştır. Detaylar için LICENSE dosyasına bakın.
+Bu proje MIT lisansı altında lisanslanmıştır.
 
-## Teşekkürler
+## İletişim
 
-Bu proje, OpenCV ve gpiozero kütüphanelerinin sunduğu imkanlar sayesinde geliştirilmiştir. Tüm bu açık kaynak projelerin katkıda bulunanlarına teşekkür ederiz. 
+Sorularınız veya önerileriniz için lütfen iletişime geçin.
+
+---
+
+**Not**: Bu proje eğitim amaçlıdır ve gerçek trafik ortamında kullanım için tasarlanmamıştır. 

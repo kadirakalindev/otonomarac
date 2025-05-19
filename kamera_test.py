@@ -300,6 +300,16 @@ class KameraTest:
         print("- C: Canny parametrelerini değiştir")
         print("- H: Hough parametrelerini değiştir")
         
+        # Pencere oluştur ve fare olaylarını bağla (güvenli bir şekilde)
+        cv2.namedWindow("Kamera Test", cv2.WINDOW_NORMAL)
+        
+        # Mouse callback güvenli bir şekilde bağla
+        try:
+            cv2.setMouseCallback("Kamera Test", lambda event, x, y, flags, param: None)
+        except Exception as e:
+            print(f"Mouse callback hatası: {e}")
+            print("Fare etkileşimi devre dışı bırakıldı.")
+        
         while self.running:
             # Kamera karesi oku veya simülasyon karesi kullan
             if hasattr(self, 'simulation_frame'):
