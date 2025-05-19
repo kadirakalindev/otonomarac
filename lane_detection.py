@@ -8,6 +8,7 @@ Otonom Araç - Basitleştirilmiş Şerit Tespiti ve Takibi Modülü
 import cv2
 import numpy as np
 import logging
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,15 +50,21 @@ class LaneDetector:
         self.min_line_length = max(15, self.height * 0.1)  # Görüntü boyutuna göre ayarla
         self.max_line_gap = min(40, self.height * 0.2)     # Görüntü boyutuna göre ayarla
         
-        # Şerit hafızası ve yumuşatma
+        # Şerit hafızası ve yumuşatma - geliştirildi
         self.last_left_fit = None
         self.last_right_fit = None
-        self.smooth_factor = 0.8  # Yumuşatma faktörü
-        self.max_memory_frames = 5  # Maksimum hafıza karesi
+        self.left_fit_history = []
+        self.right_fit_history = []
+        self.max_history_frames = 10  # Daha uzun hafıza
+        self.smooth_factor = 0.7  # Yumuşatma faktörü
+        self.confidence_threshold = 0.6  # Güven eşiği
         
-        # Hata durumu için değişkenler
+        # Şerit kaybı için değişkenler
         self.consecutive_detection_failures = 0
-        self.max_detection_failures = 10
+        self.max_detection_failures = 15  # Daha toleranslı
+        self.lane_recovery_mode = False
+        self.recovery_start_time = 0
+        self.recovery_timeout = 3.0  # 3 saniye kurtarma modu
         
         # Debug görüntüleri için sözlük
         self.debug_images = {}
@@ -171,7 +178,20 @@ class LaneDetector:
     def fit_lane_lines(self, lines, is_left=True):
         """Şerit çizgilerini uydur"""
         if not lines:
-            return None
+            # Şerit bulunamadı, hafızadaki son şeridi kullan
+            if is_left:
+                if len(self.left_fit_history) > 0:
+                    # Güven değerine göre azaltılmış bir şerit tahmini yap
+                    confidence = max(0.1, self.confidence_threshold - 0.1 * self.consecutive_detection_failures)
+                    avg_fit = np.mean(self.left_fit_history, axis=0)
+                    return avg_fit * confidence
+                return None
+            else:
+                if len(self.right_fit_history) > 0:
+                    confidence = max(0.1, self.confidence_threshold - 0.1 * self.consecutive_detection_failures)
+                    avg_fit = np.mean(self.right_fit_history, axis=0)
+                    return avg_fit * confidence
+                return None
             
         x_coords = []
         y_coords = []
@@ -187,10 +207,17 @@ class LaneDetector:
         if last_fit is not None:
             fit = self.smooth_factor * last_fit + (1 - self.smooth_factor) * fit
         
+        # Şerit hafızasını güncelle
         if is_left:
             self.last_left_fit = fit
+            self.left_fit_history.append(fit)
+            if len(self.left_fit_history) > self.max_history_frames:
+                self.left_fit_history.pop(0)
         else:
             self.last_right_fit = fit
+            self.right_fit_history.append(fit)
+            if len(self.right_fit_history) > self.max_history_frames:
+                self.right_fit_history.pop(0)
             
         return fit
     
@@ -252,6 +279,27 @@ class LaneDetector:
         # Şeritleri tespit et
         left_lines, right_lines = self.detect_lane_lines(edges)
         
+        # Şerit kurtarma modunu kontrol et
+        current_time = time.time()
+        if self.lane_recovery_mode:
+            if current_time - self.recovery_start_time > self.recovery_timeout:
+                self.lane_recovery_mode = False
+                self.consecutive_detection_failures = 0
+                if self.debug:
+                    logger.info("Şerit kurtarma modu tamamlandı")
+        
+        # Şerit tespiti başarısını kontrol et
+        if not left_lines and not right_lines:
+            self.consecutive_detection_failures += 1
+            if self.consecutive_detection_failures > self.max_detection_failures and not self.lane_recovery_mode:
+                self.lane_recovery_mode = True
+                self.recovery_start_time = current_time
+                if self.debug:
+                    logger.warning(f"Şerit kurtarma modu başlatıldı ({self.consecutive_detection_failures} başarısız tespit)")
+        else:
+            # En az bir şerit bulunduğunda hata sayacını azalt
+            self.consecutive_detection_failures = max(0, self.consecutive_detection_failures - 1)
+        
         # Şeritleri uydur
         left_fit = self.fit_lane_lines(left_lines, is_left=True)
         right_fit = self.fit_lane_lines(right_lines, is_left=False)
@@ -267,6 +315,15 @@ class LaneDetector:
             if center_diff is not None:
                 cv2.putText(result, f"Merkez Farki: {center_diff:.1f}px",
                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            # Şerit kurtarma modu bilgisi
+            if self.lane_recovery_mode:
+                cv2.putText(result, "SERIT KURTARMA MODU",
+                          (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+            # Hata sayacı
+            cv2.putText(result, f"Hata: {self.consecutive_detection_failures}/{self.max_detection_failures}",
+                      (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
             # ROI'yi göster
             cv2.polylines(result, [self.roi_vertices], True, (0, 0, 255), 2)
