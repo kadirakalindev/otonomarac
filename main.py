@@ -39,7 +39,12 @@ class OtonomArac:
                  left_pwm_pin=12,             # Sol motor Enable pini
                  right_pwm_pin=32,            # Sağ motor Enable pini
                  use_board_pins=True,         # BOARD pin numaralandırması kullan
-                 calibration_file="serit_kalibrasyon.json"):  # Kalibrasyon dosyası yolu
+                 calibration_file="serit_kalibrasyon.json",  # Kalibrasyon dosyası yolu
+                 mode="real",                 # Çalışma modu: 'real' veya 'video'
+                 video_path=None,             # Video dosyası yolu (video modunda)
+                 skip_frames=0,               # Video modunda atlanacak kare sayısı
+                 loop_video=False,            # Video bitince başa dön
+                 video_speed=1.0):            # Video oynatma hızı
         """
         OtonomArac sınıfını başlatır.
         
@@ -54,6 +59,11 @@ class OtonomArac:
             right_pwm_pin (int): Sağ motor Enable pini
             use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
             calibration_file (str): Kalibrasyon dosyası yolu
+            mode (str): Çalışma modu - 'real' veya 'video'
+            video_path (str): Test videosu dosya yolu (video modunda)
+            skip_frames (int): Video modunda atlanacak kare sayısı
+            loop_video (bool): Video bitince başa dön
+            video_speed (float): Video oynatma hızı çarpanı
         """
         self.debug = debug
         self.debug_fps = debug_fps
@@ -63,10 +73,25 @@ class OtonomArac:
         self.camera = None  # Başlangıçta None olarak tanımla
         self.calibration_file = calibration_file  # Kalibrasyon dosyası yolunu sakla
         
+        # Çalışma modu ayarları
+        self.mode = mode
+        self.video_path = video_path
+        self.skip_frames = skip_frames
+        self.loop_video = loop_video
+        self.video_speed = video_speed
+        self.video_capture = None
+        self.frame_count = 0
+        self.total_frames = 0
+        
+        # Video modu kontrolü
+        if self.mode == "video" and (self.video_path is None or not os.path.exists(self.video_path)):
+            logger.error(f"Video modu seçildi fakat geçerli bir video dosyası belirtilmedi: {self.video_path}")
+            raise ValueError("Video modunda geçerli bir video dosyası yolu belirtilmelidir")
+        
         # Modülleri başlatma denemesi - hata durumunda güvenli kapatma
         try:
-            # Kamera başlatma - güvenli başlatma için try-except kullan
-            self._initialize_camera()
+            # Giriş kaynağını başlat (kamera veya video)
+            self._initialize_input_source()
             
             # Şerit tespit modülünü başlat
             logger.info("Şerit tespit modülü başlatılıyor...")
@@ -80,18 +105,21 @@ class OtonomArac:
                 logger.warning(f"Kalibrasyon dosyası bulunamadı: {self.calibration_file}")
                 logger.warning("Varsayılan değerler kullanılacak.")
             
-            # Motor kontrol modülünü başlat
+            # Motor kontrol modülünü başlat (video modunda simüle et)
             logger.info("Motor kontrol modülü başlatılıyor...")
-            self.motor_controller = MotorController(
-                left_motor_pins=left_motor_pins,
-                right_motor_pins=right_motor_pins,
-                left_pwm_pin=left_pwm_pin,
-                right_pwm_pin=right_pwm_pin,
-                max_speed=0.7,  # Daha düşük maksimum hız (aşırı ısınmayı önlemek için)
-                default_speed=0.35,  # Daha düşük varsayılan hız (aşırı ısınmayı önlemek için)
-                use_board_pins=use_board_pins,
-                pwm_frequency=50  # PWM frekansını düşürdük - aşırı ısınmayı azaltmak için
-            )
+            if self.mode == "real":
+                self.motor_controller = MotorController(
+                    left_motor_pins=left_motor_pins,
+                    right_motor_pins=right_motor_pins,
+                    left_pwm_pin=left_pwm_pin,
+                    right_pwm_pin=right_pwm_pin,
+                    max_speed=0.7,  # Daha düşük maksimum hız (aşırı ısınmayı önlemek için)
+                    default_speed=0.35,  # Daha düşük varsayılan hız (aşırı ısınmayı önlemek için)
+                    use_board_pins=use_board_pins,
+                    pwm_frequency=50  # PWM frekansını düşürdük - aşırı ısınmayı azaltmak için
+                )
+            else:  # video modu için sanal motor kontrolörü
+                self.motor_controller = self._create_virtual_motor_controller()
         
         except Exception as e:
             logger.error(f"Başlatma hatası: {e}")
@@ -108,7 +136,77 @@ class OtonomArac:
         self.frame_count = 0
         self.fps_start_time = 0
         
-        logger.info("Otonom araç başlatıldı.")
+        logger.info(f"Otonom araç başlatıldı. Mod: {self.mode.upper()}")
+    
+    def _create_virtual_motor_controller(self):
+        """Video modu için sanal motor kontrolörü oluşturur"""
+        class VirtualMotorController:
+            def __init__(self):
+                self.left_speed = 0
+                self.right_speed = 0
+                self.direction = "stop"
+                logger.info("Sanal motor kontrolörü başlatıldı")
+                
+            def forward(self, speed=None):
+                self.left_speed = self.right_speed = speed if speed is not None else 0.35
+                self.direction = "forward"
+                logger.debug(f"[SANAL] İleri hareket: {speed}")
+                
+            def backward(self, speed=None):
+                self.left_speed = self.right_speed = speed if speed is not None else 0.35
+                self.direction = "backward"
+                logger.debug(f"[SANAL] Geri hareket: {speed}")
+                
+            def turn_left(self, speed=None):
+                self.left_speed = 0.2
+                self.right_speed = speed if speed is not None else 0.35
+                self.direction = "left"
+                logger.debug(f"[SANAL] Sola dönüş: {speed}")
+                
+            def turn_right(self, speed=None):
+                self.left_speed = speed if speed is not None else 0.35
+                self.right_speed = 0.2
+                self.direction = "right"
+                logger.debug(f"[SANAL] Sağa dönüş: {speed}")
+                
+            def stop(self):
+                self.left_speed = self.right_speed = 0
+                self.direction = "stop"
+                logger.debug("[SANAL] Durduruldu")
+                
+            def follow_lane(self, center_diff, speed=None):
+                if center_diff is None:
+                    logger.debug("[SANAL] Şerit kaybedildi")
+                    return
+                    
+                base_speed = speed if speed is not None else 0.35
+                
+                # Merkez farkına göre dönüş hesapla
+                if abs(center_diff) < 10:  # Merkezde
+                    self.left_speed = self.right_speed = base_speed
+                    logger.debug(f"[SANAL] Düz ileri: {base_speed}")
+                elif center_diff < 0:  # Sola dönüş
+                    factor = min(1.0, abs(center_diff) / 100)
+                    self.left_speed = base_speed * (1 - factor * 0.8)
+                    self.right_speed = base_speed
+                    logger.debug(f"[SANAL] Sola dönüş: L={self.left_speed:.2f}, R={self.right_speed:.2f}")
+                else:  # Sağa dönüş
+                    factor = min(1.0, abs(center_diff) / 100)
+                    self.left_speed = base_speed
+                    self.right_speed = base_speed * (1 - factor * 0.8)
+                    logger.debug(f"[SANAL] Sağa dönüş: L={self.left_speed:.2f}, R={self.right_speed:.2f}")
+            
+            def cleanup(self):
+                logger.info("[SANAL] Motor kontrolörü temizlendi")
+                
+        return VirtualMotorController()
+    
+    def _initialize_input_source(self):
+        """Giriş kaynağını başlatır (kamera veya video)"""
+        if self.mode == "real":
+            self._initialize_camera()
+        else:  # video modu
+            self._initialize_video()
     
     def _initialize_camera(self):
         """
@@ -171,14 +269,107 @@ class OtonomArac:
                 self.camera.close()
             raise
     
-    def signal_handler(self, sig, frame):
+    def _initialize_video(self):
         """
-        Sinyal yakalama işleyicisi (CTRL+C gibi)
+        Video dosyasını başlatır ve yapılandırır
         """
-        logger.info("Kapatma sinyali alındı, temizleniyor...")
-        self.cleanup()
-        sys.exit(0)
-    
+        try:
+            logger.info(f"Video dosyası açılıyor: {self.video_path}")
+            self.video_capture = cv2.VideoCapture(self.video_path)
+            
+            if not self.video_capture.isOpened():
+                raise IOError(f"Video dosyası açılamadı: {self.video_path}")
+            
+            # Video özelliklerini al
+            self.total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            video_width = int(self.video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            video_height = int(self.video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            video_fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+            
+            logger.info(f"Video yüklendi: {self.video_path}")
+            logger.info(f"Video özellikleri: {video_width}x{video_height}, {video_fps} FPS, {self.total_frames} kare")
+            
+            # İstenilen sayıda kareyi atla
+            if self.skip_frames > 0:
+                logger.info(f"{self.skip_frames} kare atlanıyor...")
+                self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, self.skip_frames)
+                self.frame_count = self.skip_frames
+            
+            # Test karesi al
+            ret, test_frame = self.video_capture.read()
+            if not ret:
+                raise IOError("Video karesini okuma hatası")
+                
+            # Video karesi boyutunu kontrol et ve gerekirse boyutlandır
+            if test_frame.shape[1] != self.camera_resolution[0] or test_frame.shape[0] != self.camera_resolution[1]:
+                logger.info(f"Video karesi yeniden boyutlandırılıyor: {test_frame.shape[1]}x{test_frame.shape[0]} -> {self.camera_resolution[0]}x{self.camera_resolution[1]}")
+            
+            # Videonun başına dön
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, self.skip_frames)
+            self.frame_count = self.skip_frames
+            
+            logger.info("Video başarıyla başlatıldı.")
+            
+        except Exception as e:
+            logger.error(f"Video başlatma hatası: {e}")
+            if hasattr(self, 'video_capture') and self.video_capture is not None:
+                self.video_capture.release()
+            raise
+
+    def _get_next_frame(self):
+        """
+        Bir sonraki kareyi alır (kamera veya videodan)
+        
+        Returns:
+            tuple: (başarı durumu, kare)
+        """
+        if self.mode == "real":
+            try:
+                # Kameradan görüntü al
+                frame = self.camera.capture_array()
+                if frame is None or frame.size == 0:
+                    return False, None
+                
+                # RGB'den BGR'ye dönüştür (OpenCV için)
+                if len(frame.shape) == 3 and frame.shape[2] == 3:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    
+                return True, frame
+            except Exception as e:
+                logger.error(f"Kamera karesi alma hatası: {e}")
+                return False, None
+        else:  # video modu
+            try:
+                # Kare oku
+                ret, frame = self.video_capture.read()
+                
+                # Video sonuna gelindiğinde
+                if not ret:
+                    if self.loop_video:
+                        logger.info("Video sonuna gelindi. Başa dönülüyor...")
+                        self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, self.skip_frames)
+                        self.frame_count = self.skip_frames
+                        ret, frame = self.video_capture.read()
+                        if not ret:
+                            return False, None
+                    else:
+                        return False, None
+                
+                self.frame_count += 1
+                
+                # Video karesi boyutunu kontrol et ve gerekirse boyutlandır
+                if frame.shape[1] != self.camera_resolution[0] or frame.shape[0] != self.camera_resolution[1]:
+                    frame = cv2.resize(frame, self.camera_resolution)
+                
+                # Video hız kontrolü - gerekirse bekleme ekle
+                if self.video_speed < 1.0:
+                    time.sleep((1.0 - self.video_speed) / 30)  # Varsayılan 30 FPS için
+                
+                return True, frame
+            except Exception as e:
+                logger.error(f"Video karesi alma hatası: {e}")
+                return False, None
+
     def start(self):
         """
         Otonom araç sürüş döngüsünü başlatır
@@ -197,9 +388,9 @@ class OtonomArac:
         last_error_time = 0
         
         try:
-            # Kamera başlatma ve yapılandırma
-            if self.camera is None:
-                self._initialize_camera()
+            # Giriş kaynağını kontrol et
+            if (self.mode == "real" and self.camera is None) or (self.mode == "video" and self.video_capture is None):
+                self._initialize_input_source()
             
             # FPS hesaplama değişkenlerini başlat
             self.fps_start_time = time.time()
@@ -218,14 +409,14 @@ class OtonomArac:
             # Görüntü işleme döngüsü
             while self.running:
                 try:
-                    # Kameradan görüntü al
-                    frame = self.camera.capture_array()
-                    if frame is None or frame.size == 0:
-                        raise Exception("Geçersiz kamera görüntüsü")
-                    
-                    # BGR'ye dönüştür (OpenCV için)
-                    if len(frame.shape) == 3 and frame.shape[2] == 3:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    # Kare al (kamera veya video)
+                    ret, frame = self._get_next_frame()
+                    if not ret:
+                        if self.mode == "video" and not self.loop_video:
+                            logger.info("Video sonuna gelindi.")
+                            break
+                        else:
+                            raise Exception("Geçersiz kare")
                     
                     # Görüntüyü işle ve şeritleri tespit et
                     processed_frame, center_diff = self.lane_detector.process_frame(frame)
@@ -246,9 +437,23 @@ class OtonomArac:
                     if self.debug:
                         current_time = time.time()
                         if current_time - last_debug_update >= debug_frame_interval:
+                            # Video modu bilgisi
+                            if self.mode == "video":
+                                progress_text = f"Video: {self.frame_count}/{self.total_frames} ({(self.frame_count/self.total_frames*100):.1f}%)"
+                                cv2.putText(processed_frame, progress_text, 
+                                          (10, processed_frame.shape[0] - 10), 
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            
                             # FPS bilgisini görüntüye ekle
-                            cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", 
+                            fps_text = f"FPS: {self.fps:.1f}"
+                            cv2.putText(processed_frame, fps_text, 
                                       (processed_frame.shape[1] - 120, 30), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            
+                            # Mod bilgisini ekle
+                            mode_text = f"Mod: {'GERÇEK' if self.mode == 'real' else 'VİDEO'}"
+                            cv2.putText(processed_frame, mode_text, 
+                                      (processed_frame.shape[1] - 120, 60), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                             
                             # Görüntüyü göster
@@ -265,6 +470,13 @@ class OtonomArac:
                                 filename = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
                                 cv2.imwrite(filename, processed_frame)
                                 logger.info(f"Ekran görüntüsü kaydedildi: {filename}")
+                            elif self.mode == "video":
+                                if key == ord(' '):  # Boşluk = Duraklat/Devam
+                                    wait_key = cv2.waitKey(0)
+                                    if wait_key == ord('q'):
+                                        logger.info("Kullanıcı tarafından durduruldu")
+                                        self.running = False
+                                        break
                     
                 except KeyboardInterrupt:
                     logger.info("Kullanıcı tarafından durduruldu (CTRL+C)")
@@ -315,15 +527,25 @@ class OtonomArac:
             self.motor_controller.cleanup()
         
         # Kamerayı kapat
-        if hasattr(self, 'camera') and self.camera is not None:
+        if self.mode == "real" and hasattr(self, 'camera') and self.camera is not None:
             try:
                 self.camera.stop()
+                logger.info("Kamera kapatıldı.")
+            except:
+                pass
+        
+        # Video kaynağını kapat
+        if self.mode == "video" and hasattr(self, 'video_capture') and self.video_capture is not None:
+            try:
+                self.video_capture.release()
+                logger.info("Video kaynağı kapatıldı.")
             except:
                 pass
         
         # OpenCV pencerelerini kapat
         if self.debug:
             cv2.destroyAllWindows()
+            logger.info("Görüntüleme pencereleri kapatıldı.")
         
         logger.info("Temizleme tamamlandı.")
 
@@ -409,6 +631,14 @@ class OtonomArac:
             logger.error(f"Kalibrasyon dosyası yüklenirken hata: {e}")
             return False
 
+    def signal_handler(self, sig, frame):
+        """
+        Sinyal yakalama işleyicisi (CTRL+C gibi)
+        """
+        logger.info("Kapatma sinyali alındı, temizleniyor...")
+        self.cleanup()
+        sys.exit(0)
+
 def parse_arguments():
     """
     Komut satırı argümanlarını işler
@@ -429,6 +659,13 @@ def parse_arguments():
     # Kalibrasyon dosyası için argüman ekle
     parser.add_argument('--calibration', default='serit_kalibrasyon.json', help='Kalibrasyon dosyası yolu')
     
+    # Video modu ve gerçek pist modu arasında geçiş için argümanlar
+    parser.add_argument('--mode', choices=['real', 'video'], default='real', help='Çalışma modu: gerçek pist veya video testi')
+    parser.add_argument('--video-path', help='Test için video dosyası yolu (video modunda gerekli)')
+    parser.add_argument('--skip-frames', type=int, default=0, help='Video modunda kaç kareyi atlayacağı')
+    parser.add_argument('--loop-video', action='store_true', help='Video bitince başa dön')
+    parser.add_argument('--video-speed', type=float, default=1.0, help='Video oynatma hızı çarpanı')
+    
     return parser.parse_args()
 
 def main():
@@ -446,9 +683,31 @@ def main():
         logger.error(f"Geçersiz çözünürlük formatı: {args.resolution}, varsayılan kullanılacak.")
         resolution = (640, 480)
     
+    # Video modu kontrolü
+    if args.mode == "video" and not args.video_path:
+        logger.error("Video modu seçildi ancak video dosya yolu belirtilmedi!")
+        print("\nHata: Video modu için --video-path parametresi gereklidir.")
+        print("Örnek kullanım: python main.py --mode video --video-path test_pist.mp4")
+        return
+    
     # Otonom aracı başlat
     try:
-        logger.info("Otonom araç başlatılıyor...")
+        mode_text = "VİDEO" if args.mode == "video" else "GERÇEK PİST"
+        logger.info(f"Otonom araç {mode_text} modunda başlatılıyor...")
+        print(f"\nOTONOM ARAÇ KONTROL PROGRAMI - {mode_text} MODU")
+        print("----------------------------------------")
+        
+        if args.mode == "video":
+            print(f"Video dosyası: {args.video_path}")
+            print(f"Video hızı: {args.video_speed}x")
+            if args.loop_video:
+                print("Video döngüsü: AÇIK (video bitince başa dönecek)")
+            print("\nKontroller:")
+            print("  q     : Çıkış")
+            print("  s     : Ekran görüntüsü")
+            print("  space : Duraklat/Devam et")
+            print("\nProgram başlatılıyor...")
+        
         otonom_arac = OtonomArac(
             camera_resolution=resolution,
             framerate=args.fps,
@@ -459,7 +718,12 @@ def main():
             left_pwm_pin=args.left_pwm,
             right_pwm_pin=args.right_pwm,
             use_board_pins=not args.use_bcm,
-            calibration_file=args.calibration
+            calibration_file=args.calibration,
+            mode=args.mode,
+            video_path=args.video_path,
+            skip_frames=args.skip_frames,
+            loop_video=args.loop_video,
+            video_speed=args.video_speed
         )
         
         # Otonom sürüşü başlat
@@ -467,8 +731,12 @@ def main():
         
     except KeyboardInterrupt:
         logger.info("Kullanıcı tarafından durduruldu (CTRL+C)")
+    except FileNotFoundError as e:
+        logger.error(f"Dosya bulunamadı: {e}")
+        print(f"\nHata: {e}")
     except Exception as e:
         logger.error(f"Hata: {e}")
+        print(f"\nHata: {e}")
     
     logger.info("Program sonlandırıldı.")
 
