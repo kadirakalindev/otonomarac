@@ -21,32 +21,6 @@ Bu proje, şerit takibi yapabilen bir otonom araç prototipi geliştirmek için 
 3. **PID Kontrolü**: Şerit takibi için hassas kontrol algoritması
 4. **Kalibrasyon Araçları**: Kamera ve şerit tespiti için kalibrasyon
 5. **Test Araçları**: Bileşenlerin test edilmesi için yardımcı programlar
-6. **Video Simülasyonu**: Gerçek pist olmadan test için video tabanlı simülasyon
-
-## Çalışma Modları
-
-Bu proje iki farklı modda çalışabilir:
-
-1. **Gerçek Pist Modu**: Gerçek bir pistte çalışma için tasarlanmıştır
-2. **Video Modu**: Test ve geliştirme için pist videosu üzerinde çalışma
-
-### Mod Geçişi Yönetimi
-
-Kalibrasyon profilleri, her mod için ayrı kalibrasyon ayarları kullanabilmenizi sağlar:
-
-```bash
-# Kalibrasyon profillerini listeleme
-python kalibrasyon_yonetici.py --list
-
-# Gerçek pist moduna geçiş
-python kalibrasyon_yonetici.py --use real
-
-# Video moduna geçiş
-python kalibrasyon_yonetici.py --use video
-
-# Mevcut kalibrasyonu belirli bir profile kaydetme
-python kalibrasyon_yonetici.py --save video
-```
 
 ## Kurulum
 
@@ -71,38 +45,6 @@ Bu pinleri kendi donanım yapılandırmanıza göre değiştirebilirsiniz.
 
 ## Kullanım
 
-### Video Pist Simülasyonu
-
-Gerçek piste erişim olmadan test ve geliştirme için:
-
-```bash
-python pist_simulatoru.py --video test_pist.mp4 --resolution 640x480
-```
-
-Simülatör kontrolleri:
-
-- **ESC/Q**: Çıkış
-- **SPACE**: Duraklat/Devam
-- **S**: Kalibrasyon kaydet
-- **C**: Kalibrasyon modu aç/kapat
-- **R**: Kareleri sıfırla
-- **1,2,3,4**: Farklı görüntüleri aç/kapat
-- **+/-**: Video hızını değiştir
-- **WASD**: Canny parametrelerini ayarla
-- **IJKL**: Hough parametrelerini ayarla
-
-### Video Modu İle Çalıştırma
-
-```bash
-python main.py --mode video --video-path test_pist.mp4 --debug
-```
-
-### Gerçek Pist Modu İle Çalıştırma
-
-```bash
-python main.py --mode real --debug
-```
-
 ### Kalibrasyon Başlatma Aracı
 
 Kalibrasyon ve test araçlarını kullanmak için başlatma aracını çalıştırın:
@@ -124,44 +66,53 @@ Bu araç size aşağıdaki seçenekleri sunar:
 Şerit takibi için kamera kalibrasyonu yapmak için:
 
 ```bash
-python kalibrasyon_optimize.py --resolution 640x480 --output serit_kalibrasyon.json
+python interaktif_kalibrasyon.py --resolution 640x480 --output serit_kalibrasyon.json
 ```
 
-### Video ve Gerçek Pist Arasında Kalibrasyon Geçişi
+Kalibrasyon sırasında şeritler üzerinde 5 nokta seçmeniz gerekiyor:
+1. Sol şeridin alt noktası
+2. Sol şeridin üst noktası
+3. Orta şeridin üst noktası (takip edilecek merkez)
+4. Sağ şeridin üst noktası
+5. Sağ şeridin alt noktası
+
+### Kamera Testi
+
+Kamera ve şerit tespitini test etmek için:
 
 ```bash
-# Gerçek pist kalibrasyonunu video kalibrasyonuna kopyala
-python kalibrasyon_yonetici.py --copy real video
-
-# Video kalibrasyonunu gerçek pist kalibrasyonuna kopyala
-python kalibrasyon_yonetici.py --copy video real
+python kamera_test.py --resolution 640x480 --calibration serit_kalibrasyon.json --debug
 ```
 
-## Pist Videosu Hazırlama
+### Motor Testi
 
-Eğer gerçek piste erişiminiz yoksa, aşağıdaki adımları izleyerek test için video yakalayabilirsiniz:
+Motorların doğru çalışıp çalışmadığını test etmek için:
 
-1. **Test pisti oluşturun**: Siyah zemin üzerine beyaz bant ile şerit oluşturun
-2. **Video kaydedin**: Telefonunuz veya kameranız ile üstten bakacak şekilde video çekin
-3. **Videoyu aktarın**: Bilgisayarınıza aktarıp simülasyon ile kullanın
+```bash
+python motor_test.py --interactive
+```
 
-Örnek video formatları: MP4, AVI (720p veya daha düşük çözünürlük önerilir)
+veya otomatik test için:
+
+```bash
+python motor_test.py --speed 50 --duration 2.0
+```
+
+### Tam Sistem Testi
+
+Şerit takibi ve motor kontrolünü birlikte test etmek için:
+
+```bash
+python main.py --debug --calibration serit_kalibrasyon.json
+```
 
 ## PID Parametreleri
 
 Şerit takibi için PID parametreleri `motor_control.py` dosyasında ayarlanabilir:
 
-- `kp`: Orantısal katsayı (varsayılan: 0.5)
-- `ki`: İntegral katsayısı (varsayılan: 0.001)
-- `kd`: Türev katsayısı (varsayılan: 0.25)
-
-## Yarışa Hazırlık Stratejisi
-
-1. **Simülasyonda Test**: Video modu ile algoritmayı test edin
-2. **Kalibrasyon Profili Oluşturun**: Video için optimum ayarları kaydedin
-3. **Gerçek Piste Uyum**: Pist üzerinde çalıştırmadan önce kalibrasyonu güncelleyin
-4. **Profillerinizi Koruyun**: Her iki mod için de kalibrasyon profillerini saklayın
-5. **Hızlı Geçiş**: Yarış sırasında `kalibrasyon_yonetici.py` aracı ile hızlıca gerçek pist profiline geçiş yapın
+- `kp`: Orantısal katsayı (varsayılan: 0.3)
+- `ki`: İntegral katsayısı (varsayılan: 0.0005)
+- `kd`: Türev katsayısı (varsayılan: 0.15)
 
 ## Sorun Giderme
 
@@ -180,17 +131,8 @@ Eğer gerçek piste erişiminiz yoksa, aşağıdaki adımları izleyerek test i�
 ### Şerit Tespit Sorunları
 
 - Işık koşullarının yeterli olduğundan emin olun.
-- Pist simülatörünü kullanarak kalibrasyon parametrelerini ayarlayın.
-- Canny ve Hough parametrelerini interaktif olarak optimize edin.
-- Gerçek pistte test etmeden önce video üzerinde senaryoları test edin.
-
-## Video-Gerçek Pist Geçiş İpuçları
-
-- **Hızlı Kalibrasyon**: Gerçek piste ulaşır ulaşmaz kalibrasyon_optimize.py aracını çalıştırın
-- **Referans Noktaları**: Gerçek pist üzerinde belirgin referans noktaları seçin
-- **Parametre Taşıma**: Video modundaki başarılı parametreleri başlangıç noktası olarak kullanın
-- **Test Sürüşü**: Tam hız denemesi öncesinde düşük hızda bir test sürüşü yapın
-- **Felaket Modu**: Beklenmeyen sorunlar için manuel kontrol modunu hazır tutun
+- Kamera kalibrasyonunu yeniden yapın.
+- Canny ve Hough parametrelerini ayarlayın.
 
 ## Geliştirme
 
@@ -199,8 +141,6 @@ Projeyi geliştirmek için aşağıdaki dosyaları inceleyebilirsiniz:
 - `motor_control.py`: Motor kontrolü ve PID algoritması
 - `lane_detection.py`: Şerit tespiti algoritması
 - `main.py`: Ana program döngüsü
-- `pist_simulatoru.py`: Video tabanlı simülasyon aracı
-- `kalibrasyon_yonetici.py`: Kalibrasyon profilleri yönetimi
 
 ## Lisans
 
