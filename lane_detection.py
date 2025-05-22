@@ -36,12 +36,6 @@ class LaneDetector:
             [self.width, self.height]
         ], dtype=np.int32)
         
-        # Orta şerit çizgisi (kalibrasyon ile ayarlanabilir)
-        self.center_line = np.array([
-            [self.width // 2, self.height],
-            [self.width // 2, int(self.height * 0.5)]
-        ], dtype=np.int32)
-        
         # Temel filtre parametreleri - hassasiyet artırıldı
         self.blur_kernel = 5
         if self.blur_kernel % 2 == 0:  # Blur kernel tek sayı olmalı
@@ -59,10 +53,8 @@ class LaneDetector:
         # Şerit hafızası ve yumuşatma - geliştirildi
         self.last_left_fit = None
         self.last_right_fit = None
-        self.last_center_fit = None  # Orta şerit için hafıza
         self.left_fit_history = []
         self.right_fit_history = []
-        self.center_fit_history = []  # Orta şerit geçmişi
         self.max_history_frames = 10  # Daha uzun hafıza
         self.smooth_factor = 0.7  # Yumuşatma faktörü
         self.confidence_threshold = 0.6  # Güven eşiği
@@ -103,12 +95,8 @@ class LaneDetector:
                 calibration = json.load(f)
                 
             # ROI noktalarını güncelle (eğer varsa)
-            if 'roi_vertices' in calibration:
-                self.roi_vertices = np.array(calibration['roi_vertices'], dtype=np.int32)
-                
-            # Orta şerit çizgisini güncelle (eğer varsa)
-            if 'center_line' in calibration:
-                self.center_line = np.array(calibration['center_line'], dtype=np.int32)
+            if 'src_points' in calibration:
+                self.roi_vertices = np.array(calibration['src_points'], dtype=np.int32)
                 
             # Filtre parametrelerini güncelle
             if 'canny_low_threshold' in calibration:
@@ -187,55 +175,6 @@ class LaneDetector:
         
         return left_lines, right_lines
     
-    def detect_center_lane(self, edges):
-        """Orta şeridi tespit et"""
-        # Orta şeridin etrafındaki bölgeyi maskele
-        center_mask = np.zeros_like(edges)
-        center_width = self.width * 0.2  # Orta şerit genişliği
-        
-        # Orta şeridin alt ve üst noktaları
-        bottom_center = self.center_line[0]
-        top_center = self.center_line[1]
-        
-        # Orta şerit için maske oluştur
-        center_roi = np.array([
-            [bottom_center[0] - center_width/2, bottom_center[1]],
-            [top_center[0] - center_width/2, top_center[1]],
-            [top_center[0] + center_width/2, top_center[1]],
-            [bottom_center[0] + center_width/2, bottom_center[1]]
-        ], dtype=np.int32)
-        
-        cv2.fillPoly(center_mask, [center_roi], 255)
-        center_edges = cv2.bitwise_and(edges, center_mask)
-        
-        # Orta şerit çizgilerini tespit et
-        lines = cv2.HoughLinesP(
-            center_edges, self.rho, self.theta, 15,
-            minLineLength=self.min_line_length,
-            maxLineGap=self.max_line_gap
-        )
-        
-        center_lines = []
-        
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                if x2 - x1 == 0:
-                    continue
-                    
-                slope = (y2 - y1) / (x2 - x1)
-                
-                # Yatay çizgileri filtrele
-                if abs(slope) < 0.3:
-                    continue
-                
-                center_lines.append((x1, y1, x2, y2, slope))
-        
-        if self.debug:
-            self.debug_images["center_edges"] = cv2.cvtColor(center_edges, cv2.COLOR_GRAY2BGR)
-        
-        return center_lines
-        
     def fit_lane_lines(self, lines, is_left=True):
         """Şerit çizgilerini uydur"""
         if not lines:
@@ -282,169 +221,32 @@ class LaneDetector:
             
         return fit
     
-    def fit_center_lane(self, center_lines):
-        """Orta şerit çizgisini uydur"""
-        if not center_lines:
-            # Şerit bulunamadı, hafızadaki son şeridi kullan
-            if len(self.center_fit_history) > 0:
-                confidence = max(0.1, self.confidence_threshold - 0.1 * self.consecutive_detection_failures)
-                avg_fit = np.mean(self.center_fit_history, axis=0)
-                return avg_fit * confidence
-            return None
-            
-        x_coords = []
-        y_coords = []
-        
-        for x1, y1, x2, y2, _ in center_lines:
-            x_coords.extend([x1, x2])
-            y_coords.extend([y1, y2])
-            
-        fit = np.polyfit(y_coords, x_coords, deg=1)
-        
-        # Önceki değerlerle yumuşatma
-        if self.last_center_fit is not None:
-            fit = self.smooth_factor * self.last_center_fit + (1 - self.smooth_factor) * fit
-        
-        # Şerit hafızasını güncelle
-        self.last_center_fit = fit
-        self.center_fit_history.append(fit)
-        if len(self.center_fit_history) > self.max_history_frames:
-            self.center_fit_history.pop(0)
-            
-        return fit
-    
-    def draw_lanes(self, image, left_fit, right_fit, center_fit=None):
+    def draw_lanes(self, image, left_fit, right_fit):
         """Şeritleri çiz"""
         overlay = np.zeros_like(image)
         
-        # Sol ve sağ şeritleri çiz (eğer varsa)
         if left_fit is not None or right_fit is not None:
             ploty = np.linspace(self.height * 0.6, self.height, 20)
             
             if left_fit is not None:
                 left_fitx = left_fit[0] * ploty + left_fit[1]
                 pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-                cv2.polylines(overlay, np.int32([pts_left]), False, (0, 255, 0), 2)
+                cv2.polylines(overlay, np.int32([pts_left]), False, (0, 255, 0), 8)
             
             if right_fit is not None:
                 right_fitx = right_fit[0] * ploty + right_fit[1]
                 pts_right = np.array([np.transpose(np.vstack([right_fitx, ploty]))])
-                cv2.polylines(overlay, np.int32([pts_right]), False, (0, 255, 0), 2)
+                cv2.polylines(overlay, np.int32([pts_right]), False, (0, 255, 0), 8)
             
             # Şeritler arası alanı doldur
             if left_fit is not None and right_fit is not None:
                 pts = np.hstack((pts_left, np.fliplr(pts_right)))
                 cv2.fillPoly(overlay, np.int32([pts]), (0, 100, 0))
         
-        # Orta şeridi çiz (eğer varsa) - daha kalın ve belirgin
-        if center_fit is not None:
-            ploty = np.linspace(self.height * 0.5, self.height, 20)
-            center_fitx = center_fit[0] * ploty + center_fit[1]
-            pts_center = np.array([np.transpose(np.vstack([center_fitx, ploty]))])
-            cv2.polylines(overlay, np.int32([pts_center]), False, (0, 0, 255), 4)
-            
-            # Orta şeridin alt noktasını belirgin göster
-            bottom_y = self.height
-            bottom_x = int(center_fit[0] * bottom_y + center_fit[1])
-            cv2.circle(overlay, (bottom_x, bottom_y), 8, (255, 0, 0), -1)
-        
         return cv2.addWeighted(image, 1, overlay, 0.5, 0)
     
-    def calculate_center_diff(self, center_fit):
-        """Merkez sapmasını hesapla - orta şeride göre"""
-        if center_fit is None:
-            return None
-            
-        # Alt noktadaki şerit pozisyonu
-        y = self.height
-        center_x = center_fit[0] * y + center_fit[1]
-        
-        # Görüntü merkezi ile şerit merkezi arasındaki fark
-        image_center = self.width / 2
-        center_diff = center_x - image_center
-        
-        return center_diff
-    
-    def process_frame(self, frame):
-        """Ana işleme fonksiyonu"""
-        # Görüntüyü işle
-        edges = self.preprocess_image(frame)
-        
-        # Şeritleri tespit et (sol ve sağ)
-        left_lines, right_lines = self.detect_lane_lines(edges)
-        
-        # Orta şeridi tespit et
-        center_lines = self.detect_center_lane(edges)
-        
-        # Şerit kurtarma modunu kontrol et
-        current_time = time.time()
-        if self.lane_recovery_mode:
-            if current_time - self.recovery_start_time > self.recovery_timeout:
-                self.lane_recovery_mode = False
-                self.consecutive_detection_failures = 0
-                if self.debug:
-                    logger.info("Şerit kurtarma modu tamamlandı")
-        
-        # Şerit tespiti başarısını kontrol et
-        if not center_lines and not left_lines and not right_lines:
-            self.consecutive_detection_failures += 1
-            if self.consecutive_detection_failures > self.max_detection_failures and not self.lane_recovery_mode:
-                self.lane_recovery_mode = True
-                self.recovery_start_time = current_time
-                if self.debug:
-                    logger.warning(f"Şerit kurtarma modu başlatıldı ({self.consecutive_detection_failures} başarısız tespit)")
-        else:
-            # En az bir şerit bulunduğunda hata sayacını azalt
-            self.consecutive_detection_failures = max(0, self.consecutive_detection_failures - 1)
-        
-        # Şeritleri uydur
-        left_fit = self.fit_lane_lines(left_lines, is_left=True)
-        right_fit = self.fit_lane_lines(right_lines, is_left=False)
-        center_fit = self.fit_center_lane(center_lines)
-        
-        # Merkez sapmasını hesapla - öncelikle orta şeride göre
-        if center_fit is not None:
-            center_diff = self.calculate_center_diff(center_fit)
-        else:
-            # Orta şerit bulunamadıysa, sol ve sağ şeritlere göre hesapla
-            center_diff = self.calculate_center_diff_from_sides(left_fit, right_fit)
-        
-        # Görselleştirme
-        result = self.draw_lanes(frame, left_fit, right_fit, center_fit)
-        
-        # Debug bilgileri
-        if self.debug:
-            if center_diff is not None:
-                cv2.putText(result, f"Merkez Farki: {center_diff:.1f}px",
-                          (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            # Şerit kurtarma modu bilgisi
-            if self.lane_recovery_mode:
-                cv2.putText(result, "SERIT KURTARMA MODU",
-                          (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                
-            # Hata sayacı
-            cv2.putText(result, f"Hata: {self.consecutive_detection_failures}/{self.max_detection_failures}",
-                      (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            
-            # Orta şerit durumu
-            if center_fit is not None:
-                cv2.putText(result, "Orta Serit: BULUNDU",
-                          (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            else:
-                cv2.putText(result, "Orta Serit: YOK",
-                          (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
-            # ROI'yi göster
-            cv2.polylines(result, [self.roi_vertices], True, (0, 0, 255), 2)
-            
-            # Orta şerit referans çizgisini göster
-            cv2.polylines(result, [self.center_line], False, (255, 255, 0), 2)
-        
-        return result, center_diff
-        
-    def calculate_center_diff_from_sides(self, left_fit, right_fit):
-        """Sol ve sağ şeritlerden merkez sapmasını hesapla"""
+    def calculate_center_diff(self, left_fit, right_fit):
+        """Merkez sapmasını hesapla"""
         if left_fit is None and right_fit is None:
             return None
             
@@ -467,4 +269,63 @@ class LaneDetector:
         image_center = self.width / 2
         center_diff = lane_center - image_center
         
-        return center_diff 
+        return center_diff
+    
+    def process_frame(self, frame):
+        """Ana işleme fonksiyonu"""
+        # Görüntüyü işle
+        edges = self.preprocess_image(frame)
+        
+        # Şeritleri tespit et
+        left_lines, right_lines = self.detect_lane_lines(edges)
+        
+        # Şerit kurtarma modunu kontrol et
+        current_time = time.time()
+        if self.lane_recovery_mode:
+            if current_time - self.recovery_start_time > self.recovery_timeout:
+                self.lane_recovery_mode = False
+                self.consecutive_detection_failures = 0
+                if self.debug:
+                    logger.info("Şerit kurtarma modu tamamlandı")
+        
+        # Şerit tespiti başarısını kontrol et
+        if not left_lines and not right_lines:
+            self.consecutive_detection_failures += 1
+            if self.consecutive_detection_failures > self.max_detection_failures and not self.lane_recovery_mode:
+                self.lane_recovery_mode = True
+                self.recovery_start_time = current_time
+                if self.debug:
+                    logger.warning(f"Şerit kurtarma modu başlatıldı ({self.consecutive_detection_failures} başarısız tespit)")
+        else:
+            # En az bir şerit bulunduğunda hata sayacını azalt
+            self.consecutive_detection_failures = max(0, self.consecutive_detection_failures - 1)
+        
+        # Şeritleri uydur
+        left_fit = self.fit_lane_lines(left_lines, is_left=True)
+        right_fit = self.fit_lane_lines(right_lines, is_left=False)
+        
+        # Merkez sapmasını hesapla
+        center_diff = self.calculate_center_diff(left_fit, right_fit)
+        
+        # Görselleştirme
+        result = self.draw_lanes(frame, left_fit, right_fit)
+        
+        # Debug bilgileri
+        if self.debug:
+            if center_diff is not None:
+                cv2.putText(result, f"Merkez Farki: {center_diff:.1f}px",
+                          (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            # Şerit kurtarma modu bilgisi
+            if self.lane_recovery_mode:
+                cv2.putText(result, "SERIT KURTARMA MODU",
+                          (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+            # Hata sayacı
+            cv2.putText(result, f"Hata: {self.consecutive_detection_failures}/{self.max_detection_failures}",
+                      (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # ROI'yi göster
+            cv2.polylines(result, [self.roi_vertices], True, (0, 0, 255), 2)
+        
+        return result, center_diff 
