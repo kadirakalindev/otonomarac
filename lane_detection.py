@@ -25,36 +25,51 @@ class LaneDetector:
         self.height = camera_resolution[1]
         self.debug = debug
         
-        # ROI parametreleri - genişletildi ve doğrulama eklendi
+        # ROI parametreleri - merkezi daha geniş bir alanı kapsayacak şekilde güncellendi
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Geçersiz çözünürlük değerleri")
             
         self.roi_vertices = np.array([
-            [0, self.height],
-            [self.width * 0.3, self.height * 0.5],  # Daha yukarı ve geniş
-            [self.width * 0.7, self.height * 0.5],  # Daha yukarı ve geniş
-            [self.width, self.height]
+            [int(self.width * 0.05), self.height],                   # Sol alt - daha geniş alt kenar
+            [int(self.width * 0.25), int(self.height * 0.45)],       # Sol üst - daha geniş görüş
+            [int(self.width * 0.75), int(self.height * 0.45)],       # Sağ üst - daha geniş görüş
+            [int(self.width * 0.95), self.height]                    # Sağ alt - daha geniş alt kenar
         ], dtype=np.int32)
         
         # Orta şerit çizgisi (kalibrasyon ile ayarlanabilir)
         self.center_line = np.array([
             [self.width // 2, self.height],
-            [self.width // 2, int(self.height * 0.5)]
+            [self.width // 2, int(self.height * 0.45)]  # Daha yukarıya uzatıldı
         ], dtype=np.int32)
         
-        # Temel filtre parametreleri - hassasiyet artırıldı
+        # Görüntü işleme parametreleri - ışık koşullarına daha duyarlı
         self.blur_kernel = 5
         if self.blur_kernel % 2 == 0:  # Blur kernel tek sayı olmalı
             self.blur_kernel += 1
             
-        self.canny_low = 30    # Düşürüldü
-        self.canny_high = 120  # Düşürüldü
+        self.canny_low = 25    # Daha hassas kenar tespiti için düşürüldü
+        self.canny_high = 100  # Daha hassas kenar tespiti için düşürüldü
         
-        # Hough parametreleri - hassasiyet artırıldı ve sınırlar eklendi
+        # İlave görüntü işleme parametreleri
+        self.adaptive_threshold_block_size = 11  # Bölgesel ışık değişimlerine adaptasyon için
+        self.adaptive_threshold_constant = 2     # Duyarlılık ayarı
+        
+        # Renk maskeleme için HSV eşikleri (beyaz ve sarı şeritler için)
+        self.white_lower = np.array([0, 0, 200])
+        self.white_upper = np.array([180, 30, 255])
+        self.yellow_lower = np.array([15, 80, 120])
+        self.yellow_upper = np.array([35, 255, 255])
+        
+        # Hough parametreleri - hassasiyet artırıldı, çözünürlüğe göre ayarlandı
         self.rho = max(1, min(2, self.width / 320))  # Çözünürlüğe göre ayarla
         self.theta = np.pi/180
-        self.min_line_length = max(15, self.height * 0.1)  # Görüntü boyutuna göre ayarla
-        self.max_line_gap = min(40, self.height * 0.2)     # Görüntü boyutuna göre ayarla
+        self.hough_threshold = int(max(15, self.height / 16))        # Çözünürlüğe göre ayarla
+        self.min_line_length = max(15, int(self.height * 0.12))      # Çözünürlüğe göre ayarla
+        self.max_line_gap = min(40, int(self.height * 0.18))         # Çözünürlüğe göre ayarla
+        
+        # Şerit tespiti parametreleri
+        self.line_filter_slope_threshold = 0.25   # Yatay çizgileri filtrelemek için eğim eşiği
+        self.edge_detection_kernel = np.ones((3, 3), np.uint8)  # Kenar genişletme için kernel
         
         # Şerit hafızası ve yumuşatma - geliştirildi
         self.last_left_fit = None
@@ -63,13 +78,13 @@ class LaneDetector:
         self.left_fit_history = []
         self.right_fit_history = []
         self.center_fit_history = []  # Orta şerit geçmişi
-        self.max_history_frames = 10  # Daha uzun hafıza
-        self.smooth_factor = 0.7  # Yumuşatma faktörü
+        self.max_history_frames = 15  # Hafıza uzunluğu
+        self.smooth_factor = 0.8  # Yumuşatma faktörü (daha fazla yumuşatma)
         self.confidence_threshold = 0.6  # Güven eşiği
         
         # Şerit kaybı için değişkenler
         self.consecutive_detection_failures = 0
-        self.max_detection_failures = 15  # Daha toleranslı
+        self.max_detection_failures = 15
         self.lane_recovery_mode = False
         self.recovery_start_time = 0
         self.recovery_timeout = 3.0  # 3 saniye kurtarma modu
@@ -80,13 +95,16 @@ class LaneDetector:
     def validate_frame(self, frame):
         """Gelen kareyi doğrula"""
         if frame is None:
-            raise ValueError("Boş kare alındı")
+            logger.error("Boş kare alındı")
+            return False
             
         if len(frame.shape) != 3:
-            raise ValueError("Geçersiz kare formatı")
+            logger.error(f"Geçersiz kare formatı: {frame.shape}")
+            return False
             
         if frame.shape[0] != self.height or frame.shape[1] != self.width:
-            raise ValueError(f"Kare boyutu uyumsuz: Beklenen {self.width}x{self.height}, Alınan {frame.shape[1]}x{frame.shape[0]}")
+            logger.warning(f"Kare boyutu uyumsuz: Beklenen {self.width}x{self.height}, Alınan {frame.shape[1]}x{frame.shape[0]}")
+            return False
             
         return True
         
@@ -102,47 +120,105 @@ class LaneDetector:
             with open(calibration_file, 'r') as f:
                 calibration = json.load(f)
                 
-            # ROI noktalarını güncelle (eğer varsa)
-            if 'roi_vertices' in calibration:
-                self.roi_vertices = np.array(calibration['roi_vertices'], dtype=np.int32)
+            # Yeni kalibrasyon format kontrolü (kalibrasyon_optimize.py)
+            if 'src_points' in calibration and 'dst_points' in calibration:
+                logger.info("kalibrasyon_optimize.py formatında kalibrasyon dosyası tespit edildi.")
                 
-            # Orta şerit çizgisini güncelle (eğer varsa)
-            if 'center_line' in calibration:
-                self.center_line = np.array(calibration['center_line'], dtype=np.int32)
+                # src_points'i ROI olarak kullan
+                src_points = calibration['src_points']
                 
-            # Filtre parametrelerini güncelle
+                # ROI noktalarını güncelle
+                self.roi_vertices = np.array([
+                    src_points[2],  # Sol alt
+                    src_points[0],  # Sol üst
+                    src_points[1],  # Sağ üst
+                    src_points[3]   # Sağ alt
+                ], dtype=np.int32)
+                
+                # Orta şerit çizgisini oluştur
+                self.center_line = np.array([
+                    [(src_points[2][0] + src_points[3][0]) // 2, self.height],  # Alt orta nokta
+                    [(src_points[0][0] + src_points[1][0]) // 2, (src_points[0][1] + src_points[1][1]) // 2]  # Üst orta nokta
+                ], dtype=np.int32)
+                
+                logger.info("ROI ve orta şerit çizgisi güncellendi.")
+            
+            # Şerit tespit parametrelerini ayarla
             if 'canny_low_threshold' in calibration:
                 self.canny_low = calibration['canny_low_threshold']
             if 'canny_high_threshold' in calibration:
                 self.canny_high = calibration['canny_high_threshold']
             if 'blur_kernel_size' in calibration:
                 self.blur_kernel = calibration['blur_kernel_size']
-                
-            # Hough parametrelerini güncelle
+                if self.blur_kernel % 2 == 0:  # Blur kernel tek sayı olmalı
+                    self.blur_kernel += 1
+            
+            # Hough parametrelerini ayarla
             if 'hough_threshold' in calibration:
-                self.rho = calibration['hough_threshold']
+                self.hough_threshold = calibration['hough_threshold']
             if 'min_line_length' in calibration:
                 self.min_line_length = calibration['min_line_length']
             if 'max_line_gap' in calibration:
                 self.max_line_gap = calibration['max_line_gap']
+            
+            # Renk parametreleri (eğer varsa)
+            if 'white_lower' in calibration:
+                self.white_lower = np.array(calibration['white_lower'])
+            if 'white_upper' in calibration:
+                self.white_upper = np.array(calibration['white_upper'])
+            if 'yellow_lower' in calibration:
+                self.yellow_lower = np.array(calibration['yellow_lower'])
+            if 'yellow_upper' in calibration:
+                self.yellow_upper = np.array(calibration['yellow_upper'])
                 
             logger.info(f"Kalibrasyon dosyası yüklendi: {calibration_file}")
             return True
-            
+                
         except Exception as e:
             logger.error(f"Kalibrasyon dosyası yüklenirken hata: {e}")
             return False
         
     def preprocess_image(self, image):
-        """Temel görüntü ön işleme"""
+        """Temel görüntü ön işleme - geliştirilmiş versiyon"""
+        # Görüntü doğrulama
+        if image is None or image.size == 0:
+            logger.error("Geçersiz görüntü")
+            return np.zeros((self.height, self.width), dtype=np.uint8)
+        
+        # BGR'den HSV'ye dönüştür
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
         # Gri tonlamaya çevir
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Renk maskesi oluştur (beyaz ve sarı şeritler için)
+        white_mask = cv2.inRange(hsv, self.white_lower, self.white_upper)
+        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
+        
+        # Maskeleri birleştir
+        color_mask = cv2.bitwise_or(white_mask, yellow_mask)
         
         # Gürültü azaltma
         blurred = cv2.GaussianBlur(gray, (self.blur_kernel, self.blur_kernel), 0)
         
-        # Kenar tespiti
-        edges = cv2.Canny(blurred, self.canny_low, self.canny_high)
+        # Adaptif eşikleme - bölgesel parlaklık farklılıklarına daha iyi adapte olur
+        thresh = cv2.adaptiveThreshold(
+            blurred, 
+            255, 
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY_INV, 
+            self.adaptive_threshold_block_size, 
+            self.adaptive_threshold_constant
+        )
+        
+        # Renk maskesi ve eşiklenmiş görüntüyü birleştir
+        combined_binary = cv2.bitwise_or(thresh, color_mask)
+        
+        # Kenar tespiti (Canny)
+        edges = cv2.Canny(combined_binary, self.canny_low, self.canny_high)
+        
+        # Kenarları genişlet (daha belirgin hale getir)
+        edges = cv2.dilate(edges, self.edge_detection_kernel, iterations=1)
         
         # ROI maskesi
         mask = np.zeros_like(edges)
@@ -151,15 +227,17 @@ class LaneDetector:
         
         if self.debug:
             self.debug_images["gray"] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            self.debug_images["color_mask"] = cv2.cvtColor(color_mask, cv2.COLOR_GRAY2BGR)
+            self.debug_images["threshold"] = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
             self.debug_images["edges"] = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
             self.debug_images["masked"] = cv2.cvtColor(masked, cv2.COLOR_GRAY2BGR)
         
         return masked
     
     def detect_lane_lines(self, edges):
-        """Basitleştirilmiş şerit tespiti"""
+        """Basitleştirilmiş şerit tespiti - geliştirilmiş versiyon"""
         lines = cv2.HoughLinesP(
-            edges, self.rho, self.theta, 20,
+            edges, self.rho, self.theta, self.hough_threshold,
             minLineLength=self.min_line_length,
             maxLineGap=self.max_line_gap
         )
@@ -170,20 +248,41 @@ class LaneDetector:
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
+                
+                # Çizgi uzunluğu çok kısaysa atla
+                line_length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                if line_length < self.min_line_length:
+                    continue
+                
+                # Düşey çizgilerde bölünmeyi önle
                 if x2 - x1 == 0:
                     continue
                     
                 slope = (y2 - y1) / (x2 - x1)
                 
-                # Yatay çizgileri filtrele
-                if abs(slope) < 0.3:
+                # Düşük eğimli (yatay) çizgileri filtrele
+                if abs(slope) < self.line_filter_slope_threshold:
                     continue
+                
+                # Görüntünün alt kısmında olan çizgilere daha fazla ağırlık ver
+                # (genellikle şeritlerin daha güvenilir kısmı)
+                y_factor = 1.0 + 0.5 * (min(y1, y2) / self.height)
+                weight = line_length * abs(slope) * y_factor
                 
                 # Sol ve sağ şeritleri ayır
                 if slope < 0 and x1 < self.width * 0.6:
-                    left_lines.append((x1, y1, x2, y2, slope))
+                    left_lines.append((x1, y1, x2, y2, slope, weight))
                 elif slope > 0 and x1 > self.width * 0.4:
-                    right_lines.append((x1, y1, x2, y2, slope))
+                    right_lines.append((x1, y1, x2, y2, slope, weight))
+        
+        # Çizgileri ağırlıklarına göre sırala (en önemlileri en üstte)
+        left_lines.sort(key=lambda x: x[5], reverse=True)
+        right_lines.sort(key=lambda x: x[5], reverse=True)
+        
+        # Sadece en iyi çizgileri seç (gürültüyü azaltmak için)
+        max_lines = 5  # En çok bu kadar çizgi kullan
+        left_lines = left_lines[:max_lines]
+        right_lines = right_lines[:max_lines]
         
         return left_lines, right_lines
     
@@ -314,41 +413,86 @@ class LaneDetector:
         return fit
     
     def draw_lanes(self, image, left_fit, right_fit, center_fit=None):
-        """Şeritleri çiz"""
+        """Şeritleri çiz - geliştirilmiş versiyon"""
         overlay = np.zeros_like(image)
         
         # Sol ve sağ şeritleri çiz (eğer varsa)
         if left_fit is not None or right_fit is not None:
-            ploty = np.linspace(self.height * 0.6, self.height, 20)
+            # Alt yarıya odaklan - şeritlerin en güvenilir kısmı
+            ploty = np.linspace(self.height * 0.5, self.height, 30)  # Daha fazla nokta
             
+            # Şerit güven göstergesi renkleri
+            high_confidence_color = (0, 255, 0)  # Yeşil - yüksek güven
+            medium_confidence_color = (0, 255, 255)  # Sarı - orta güven
+            low_confidence_color = (0, 128, 255)  # Turuncu - düşük güven
+            
+            # Şerit güven seviyesini belirle
+            left_confidence = 1.0 
+            right_confidence = 1.0
+            
+            if len(self.left_fit_history) > 0:
+                left_confidence = min(1.0, 1.0 - (0.05 * self.consecutive_detection_failures))
+            if len(self.right_fit_history) > 0:
+                right_confidence = min(1.0, 1.0 - (0.05 * self.consecutive_detection_failures))
+            
+            # Renkleri güven seviyesine göre belirle
             if left_fit is not None:
+                if left_confidence > 0.8:
+                    left_color = high_confidence_color
+                elif left_confidence > 0.5:
+                    left_color = medium_confidence_color
+                else:
+                    left_color = low_confidence_color
+                    
                 left_fitx = left_fit[0] * ploty + left_fit[1]
                 pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-                cv2.polylines(overlay, np.int32([pts_left]), False, (0, 255, 0), 2)
+                cv2.polylines(overlay, np.int32([pts_left]), False, left_color, 2)
             
             if right_fit is not None:
+                if right_confidence > 0.8:
+                    right_color = high_confidence_color
+                elif right_confidence > 0.5:
+                    right_color = medium_confidence_color
+                else:
+                    right_color = low_confidence_color
+                    
                 right_fitx = right_fit[0] * ploty + right_fit[1]
                 pts_right = np.array([np.transpose(np.vstack([right_fitx, ploty]))])
-                cv2.polylines(overlay, np.int32([pts_right]), False, (0, 255, 0), 2)
+                cv2.polylines(overlay, np.int32([pts_right]), False, right_color, 2)
             
-            # Şeritler arası alanı doldur
+            # Şeritler arası alanı doldur (sadece her iki şerit de tespit edildiğinde)
             if left_fit is not None and right_fit is not None:
-                pts = np.hstack((pts_left, np.fliplr(pts_right)))
-                cv2.fillPoly(overlay, np.int32([pts]), (0, 100, 0))
+                left_fitx = left_fit[0] * ploty + left_fit[1]
+                right_fitx = right_fit[0] * ploty + right_fit[1]
+                pts = np.hstack((
+                    np.array([np.transpose(np.vstack([left_fitx, ploty]))]),
+                    np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+                ))
+                cv2.fillPoly(overlay, np.int32([pts]), (0, 80, 0))
         
-        # Orta şeridi çiz (eğer varsa) - daha kalın ve belirgin
+        # Orta şeridi çiz (eğer varsa) - daha belirgin
         if center_fit is not None:
-            ploty = np.linspace(self.height * 0.5, self.height, 20)
+            ploty = np.linspace(self.height * 0.4, self.height, 30)
             center_fitx = center_fit[0] * ploty + center_fit[1]
             pts_center = np.array([np.transpose(np.vstack([center_fitx, ploty]))])
-            cv2.polylines(overlay, np.int32([pts_center]), False, (0, 0, 255), 4)
             
-            # Orta şeridin alt noktasını belirgin göster
+            # Orta şerit çizgisini daha kalın ve belirgin yap
+            cv2.polylines(overlay, np.int32([pts_center]), False, (0, 0, 255), 5)
+            
+            # Orta şeridin alt noktasını belirgin göster (takip referansı)
             bottom_y = self.height
             bottom_x = int(center_fit[0] * bottom_y + center_fit[1])
-            cv2.circle(overlay, (bottom_x, bottom_y), 8, (255, 0, 0), -1)
+            cv2.circle(overlay, (bottom_x, bottom_y), 10, (255, 0, 0), -1)
         
-        return cv2.addWeighted(image, 1, overlay, 0.5, 0)
+        # Görüntüyü daha iyi görünürlük için birleştir
+        result = cv2.addWeighted(image, 1, overlay, 0.6, 0)
+        
+        # ROI bölgesini göster (debug modunda)
+        if self.debug:
+            cv2.polylines(result, [self.roi_vertices], True, (0, 255, 255), 2)
+            cv2.polylines(result, [self.center_line], False, (255, 255, 0), 2)
+            
+        return result
     
     def calculate_center_diff(self, center_fit):
         """Merkez sapmasını hesapla - orta şeride göre"""
@@ -365,8 +509,42 @@ class LaneDetector:
         
         return center_diff
     
+    def calculate_center_diff_from_sides(self, left_fit, right_fit):
+        """Sol ve sağ şeritlerden merkez sapmasını hesapla"""
+        if left_fit is None and right_fit is None:
+            return None
+            
+        # Alt noktadaki şerit pozisyonları
+        y = self.height
+        
+        if left_fit is not None and right_fit is not None:
+            left_x = left_fit[0] * y + left_fit[1]
+            right_x = right_fit[0] * y + right_fit[1]
+            lane_center = (left_x + right_x) / 2
+            
+        elif left_fit is not None:
+            left_x = left_fit[0] * y + left_fit[1]
+            lane_center = left_x + self.width * 0.25  # Tahmini şerit genişliği
+            
+        else:  # right_fit is not None
+            right_x = right_fit[0] * y + right_fit[1]
+            lane_center = right_x - self.width * 0.25  # Tahmini şerit genişliği
+        
+        image_center = self.width / 2
+        center_diff = lane_center - image_center
+        
+        return center_diff 
+
     def process_frame(self, frame):
-        """Ana işleme fonksiyonu"""
+        """Ana işleme fonksiyonu - geliştirilmiş versiyon"""
+        # Kare doğrulama
+        if not self.validate_frame(frame):
+            # Hatalı kare, boş değer ve hata göster
+            placeholder = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            cv2.putText(placeholder, "GECERSIZ KARE", (self.width//3, self.height//2), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            return placeholder, None
+            
         # Görüntüyü işle
         edges = self.preprocess_image(frame)
         
@@ -434,37 +612,5 @@ class LaneDetector:
             else:
                 cv2.putText(result, "Orta Serit: YOK",
                           (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
-            # ROI'yi göster
-            cv2.polylines(result, [self.roi_vertices], True, (0, 0, 255), 2)
-            
-            # Orta şerit referans çizgisini göster
-            cv2.polylines(result, [self.center_line], False, (255, 255, 0), 2)
         
-        return result, center_diff
-        
-    def calculate_center_diff_from_sides(self, left_fit, right_fit):
-        """Sol ve sağ şeritlerden merkez sapmasını hesapla"""
-        if left_fit is None and right_fit is None:
-            return None
-            
-        # Alt noktadaki şerit pozisyonları
-        y = self.height
-        
-        if left_fit is not None and right_fit is not None:
-            left_x = left_fit[0] * y + left_fit[1]
-            right_x = right_fit[0] * y + right_fit[1]
-            lane_center = (left_x + right_x) / 2
-            
-        elif left_fit is not None:
-            left_x = left_fit[0] * y + left_fit[1]
-            lane_center = left_x + self.width * 0.25  # Tahmini şerit genişliği
-            
-        else:  # right_fit is not None
-            right_x = right_fit[0] * y + right_fit[1]
-            lane_center = right_x - self.width * 0.25  # Tahmini şerit genişliği
-        
-        image_center = self.width / 2
-        center_diff = lane_center - image_center
-        
-        return center_diff 
+        return result, center_diff 
