@@ -39,9 +39,7 @@ class OtonomArac:
                  left_pwm_pin=12,             # Sol motor Enable pini
                  right_pwm_pin=32,            # Sağ motor Enable pini
                  use_board_pins=True,         # BOARD pin numaralandırması kullan
-                 calibration_file="serit_kalibrasyon.json",  # Kalibrasyon dosyası yolu
-                 camera_type="picamera2",     # Kamera tipi: 'picamera2', 'picamera', 'opencv'
-                 camera_index=0):             # Kamera indeksi (OpenCV için)
+                 calibration_file="serit_kalibrasyon.json"):  # Kalibrasyon dosyası yolu
         """
         OtonomArac sınıfını başlatır.
         
@@ -56,8 +54,6 @@ class OtonomArac:
             right_pwm_pin (int): Sağ motor Enable pini
             use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
             calibration_file (str): Kalibrasyon dosyası yolu
-            camera_type (str): Kullanılacak kamera tipi ('picamera2', 'picamera', 'opencv')
-            camera_index (int): Kamera indeksi (OpenCV için)
         """
         self.debug = debug
         self.debug_fps = debug_fps
@@ -66,8 +62,6 @@ class OtonomArac:
         self.framerate = framerate
         self.camera = None  # Başlangıçta None olarak tanımla
         self.calibration_file = calibration_file  # Kalibrasyon dosyası yolunu sakla
-        self.camera_type = camera_type  # Kamera tipini sakla
-        self.camera_index = camera_index  # Kamera indeksini sakla
         
         # Modülleri başlatma denemesi - hata durumunda güvenli kapatma
         try:
@@ -118,103 +112,63 @@ class OtonomArac:
     
     def _initialize_camera(self):
         """
-        Kamera başlatma ve ayarlaması
+        Kamera modülünü başlatır ve yapılandırır
         """
         try:
-            resolution = self.camera_resolution
-            camera_config = {
-                'resolution': resolution,
-                'framerate': 25,
-            }
+            logger.info("Kamera başlatılıyor...")
+            self.camera = Picamera2()
             
-            if self.camera_type == 'picamera2':
-                from picamera2 import Picamera2
-                
-                self.camera = Picamera2()
-                
-                # Kamera yapılandırması
-                config = self.camera.create_still_configuration(
-                    main={"size": resolution, "format": "RGB888"}, 
-                    lores={"size": (640, 480), "format": "YUV420"}, 
-                    display="lores",
-                )
-                self.camera.configure(config)
-                
-                # Kamera parametrelerini iyileştir
-                if hasattr(self.camera, 'set_controls'):
-                    try:
-                        self.camera.set_controls({
-                            "ExposureTime": 15000,  # Pozlama süresini artır
-                            "AnalogueGain": 1.5,   # Analog kazancı artır
-                            "Brightness": 0.5,     # Parlaklığı artır
-                            "Contrast": 1.2,       # Kontrastı artır
-                            "Sharpness": 2.5,      # Keskinliği artır
-                            "Saturation": 1.3,     # Doygunluğu artır
-                            "NoiseReductionMode": 2, # Gürültü azaltma
-                        })
-                    except Exception as e:
-                        logger.warning(f"Kamera parametreleri ayarlanamadı: {e}")
-                
-                self.camera.start()
-                
-                # Kameranın dengelenmesi için bekle
-                logger.info("Kamera dengeleniyor...")
-                time.sleep(3)  # Dengeleme için bekleme süresini artır
-                
-                logger.info(f"PiCamera2 başlatıldı: {resolution}")
+            # Kamera yapılandırması - daha detaylı
+            preview_config = self.camera.create_preview_configuration(
+                main={"size": self.camera_resolution, "format": "RGB888"},
+                lores={"size": (320, 240), "format": "YUV420"},
+                display="lores",
+                buffer_count=4  # Buffer sayısını artır
+            )
+            self.camera.configure(preview_config)
             
-            elif self.camera_type == 'picamera':
-                import picamera
-                
-                self.camera = picamera.PiCamera()
-                self.camera.resolution = resolution
-                self.camera.framerate = camera_config['framerate']
-                
-                # Kamera parametreleri
-                self.camera.brightness = 55      # Parlaklığı artır (0-100)
-                self.camera.contrast = 60        # Kontrastı artır (0-100)
-                self.camera.sharpness = 70       # Keskinliği artır (0-100)
-                self.camera.saturation = 30      # Doygunluğu artır (0-100)
-                self.camera.exposure_mode = 'auto'
-                self.camera.awb_mode = 'auto'
-                
-                # Kameranın dengelenmesi için bekle
-                logger.info("Kamera dengeleniyor...")
-                time.sleep(3)  # Dengeleme için bekleme süresini artır
-                
-                logger.info(f"PiCamera başlatıldı: {resolution}")
+            # Kamera özel ayarlarını düzenleme
+            try:
+                controls = {
+                    "AwbEnable": True,          # Otomatik beyaz dengesi
+                    "AeEnable": True,           # Otomatik pozlama
+                    "ExposureTime": 10000,      # Pozlama süresi (mikrosaniye)
+                    "AnalogueGain": 1.0,        # Analog kazanç
+                    "Brightness": 0.3,          # Parlaklık
+                    "Contrast": 1.0,            # Kontrast
+                    "Sharpness": 1.0,           # Keskinlik
+                    "NoiseReductionMode": 1     # Gürültü azaltma
+                }
+                self.camera.set_controls(controls)
+                logger.info("Kamera kontrolleri ayarlandı")
+            except Exception as e:
+                logger.warning(f"Kamera kontrolleri ayarlanırken hata: {e}")
             
-            elif self.camera_type == 'opencv':
-                import cv2
-                
-                # OpenCV kamerası
-                self.camera = cv2.VideoCapture(self.camera_index)
-                
-                # Ayarlar
-                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
-                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
-                self.camera.set(cv2.CAP_PROP_FPS, camera_config['framerate'])
-                
-                # Kamera görüntü ayarlarını iyileştir
-                self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 0.6)  # Parlaklığı artır (0-1)
-                self.camera.set(cv2.CAP_PROP_CONTRAST, 0.6)    # Kontrastı artır (0-1)
-                self.camera.set(cv2.CAP_PROP_SATURATION, 0.7)  # Doygunluğu artır (0-1)
-                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)  # Pozlama ayarı
-                
-                # Kameranın dengelenmesi için bekle
-                logger.info("Kamera dengeleniyor...")
-                time.sleep(3)  # Dengeleme için bekleme süresini artır
-                
-                if not self.camera.isOpened():
-                    raise RuntimeError("Kamera açılamadı")
-                
-                logger.info(f"OpenCV kamerası başlatıldı: {resolution}")
+            # Kamerayı başlat
+            self.camera.start()
             
-            else:
-                raise ValueError(f"Desteklenmeyen kamera tipi: {self.camera_type}")
-                
+            # Test görüntüsü al
+            logger.info("Kamera test ediliyor...")
+            for _ in range(3):  # 3 kere dene
+                try:
+                    test_frame = self.camera.capture_array()
+                    if test_frame is not None and test_frame.size > 0:
+                        logger.info(f"Kamera test başarılı. Görüntü boyutu: {test_frame.shape}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Test görüntüsü alınamadı, tekrar deneniyor: {e}")
+                time.sleep(0.5)
+            
+            # Kameranın dengelenmesi için bekle
+            logger.info("Kamera dengeleniyor...")
+            time.sleep(2)
+            
+            logger.info("Kamera başarıyla başlatıldı.")
+            
         except Exception as e:
             logger.error(f"Kamera başlatma hatası: {e}")
+            if hasattr(self, 'camera') and self.camera is not None:
+                self.camera.close()
             raise
     
     def signal_handler(self, sig, frame):
@@ -475,12 +429,6 @@ def parse_arguments():
     # Kalibrasyon dosyası için argüman ekle
     parser.add_argument('--calibration', default='serit_kalibrasyon.json', help='Kalibrasyon dosyası yolu')
     
-    # Kamera tipi ve indeks argümanları
-    parser.add_argument('--camera-type', choices=['picamera2', 'picamera', 'opencv'], default='picamera2',
-                      help='Kullanılacak kamera tipi (varsayılan: picamera2)')
-    parser.add_argument('--camera-index', type=int, default=0, 
-                      help='Kamera indeksi (OpenCV için, varsayılan: 0)')
-    
     return parser.parse_args()
 
 def main():
@@ -511,9 +459,7 @@ def main():
             left_pwm_pin=args.left_pwm,
             right_pwm_pin=args.right_pwm,
             use_board_pins=not args.use_bcm,
-            calibration_file=args.calibration,
-            camera_type=args.camera_type,
-            camera_index=args.camera_index
+            calibration_file=args.calibration
         )
         
         # Otonom sürüşü başlat

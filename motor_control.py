@@ -32,64 +32,44 @@ class MotorController:
     """
     Motor kontrolünden sorumlu sınıf
     """
-    def __init__(self, gpio_manager, 
-                 left_forward_pin, left_backward_pin, 
-                 right_forward_pin, right_backward_pin,
-                 min_motor_speed=20, max_motor_speed=100, default_speed=40):
+    def __init__(self, 
+                 left_motor_pins=(16, 18),    # Sol motor için (IN1, IN2) pin numaraları
+                 right_motor_pins=(36, 38),   # Sağ motor için (IN1, IN2) pin numaraları
+                 left_pwm_pin=12,             # Sol motor için PWM enable pini
+                 right_pwm_pin=32,            # Sağ motor için PWM enable pini
+                 max_speed=0.50,              # Maksimum hızı biraz daha düşürdük
+                 default_speed=0.25,          # Varsayılan hızı düşürdük
+                 use_board_pins=True,         # BOARD pin numaralandırmasını kullan
+                 pwm_frequency=25):          # PWM frekansı
         """
-        Motor kontrolcüsü sınıfı
+        MotorController sınıfını başlatır.
+        
+        Args:
+            left_motor_pins (tuple): Sol motor kontrol pinleri (IN1, IN2)
+            right_motor_pins (tuple): Sağ motor kontrol pinleri (IN1, IN2)
+            left_pwm_pin (int): Sol motor için PWM pini (Enable)
+            right_pwm_pin (int): Sağ motor için PWM pini (Enable)
+            max_speed (float): Maksimum hız seviyesi (0-1 arası)
+            default_speed (float): Varsayılan hız seviyesi (0-1 arası)
+            use_board_pins (bool): BOARD pin numaralandırmasını kullan (True) veya BCM kullan (False)
+            pwm_frequency (int): PWM frekansı (Hz) - aşırı ısınmayı önlemek için düşürüldü
         """
-        self.gpio = gpio_manager
-        
-        # Motor pin tanımlamaları
-        self.motor_pins = {
-            'left': {
-                'forward': left_forward_pin,
-                'backward': left_backward_pin
-            },
-            'right': {
-                'forward': right_forward_pin,
-                'backward': right_backward_pin
-            }
-        }
-        
-        # Motor hız parametreleri
-        self.min_motor_speed = min_motor_speed
-        self.max_motor_speed = max_motor_speed
+        # Pin numaralarını doğrula
+        if not all(isinstance(pin, int) for pin in [*left_motor_pins, *right_motor_pins, left_pwm_pin, right_pwm_pin]):
+            raise ValueError("Tüm pin değerleri tam sayı olmalıdır")
+            
+        # Hız değerlerini doğrula
+        if not 0 < max_speed <= 1 or not 0 < default_speed <= max_speed:
+            raise ValueError("Geçersiz hız değerleri")
+            
+        # PWM frekansını doğrula
+        if not 20 <= pwm_frequency <= 100:
+            raise ValueError("PWM frekansı 20-100 Hz aralığında olmalıdır")
+            
+        self.use_board_pins = use_board_pins
+        self.max_speed = max_speed
         self.default_speed = default_speed
-        
-        # Dönüş parametreleri
-        self.turn_speed_factor = 1.2  # Dönüşlerde hız ayarlama faktörü
-        self.center_deadzone = 10     # Merkez ölü bölge (px) - bu aralıkta düz git
-        
-        # Motor dengeleme faktörleri - motorlar arasındaki güç farklılıkları için ayarlama
-        self.left_motor_factor = 0.90  # Sol motor daha yavaş
-        self.right_motor_factor = 1.05  # Sağ motor daha hızlı
-        logger.info(f"Motor faktörleri: Sol={self.left_motor_factor}, Sağ={self.right_motor_factor}")
-        
-        # PID Kontrolü parametreleri
-        self.kp = 0.03  # Oransal kazanç
-        self.ki = 0.001  # İntegral kazanç
-        self.kd = 0.02  # Türevsel kazanç
-        self.previous_error = 0  # Önceki hata
-        self.integral = 0        # İntegral birikimi
-        self.last_pid_time = time.time()  # Son PID hesaplama zamanı
-        
-        # Ek parametreler
-        self.lost_lane_counter = 0  # Şerit kaybolma sayacı
-        self.debug_log_counter = 0  # Debug log sınırlama sayacı
-        self.log_threshold = 10     # Her kaç yineleme de bir log yazılacak
-        
-        # Motor faktörlerini güncellemek için sayaçlar
-        self.calibration_counter = 0
-        self.left_motor_time = 0
-        self.right_motor_time = 0
-        
-        # GPIO çıkışlarını ayarla
-        self._setup_gpio()
-        
-        # Başlangıçta motorları durdur
-        self.stop()
+        self.min_motor_speed = 0.15  # Minimum çalışma hızı
         
         # Motor durumu izleme
         self.motor_states = {
@@ -111,7 +91,120 @@ class MotorController:
         self.max_motor_errors = 5
         self.error_reset_time = 60  # 1 dakika
         
+        # Pin numaralarını ayarla (BOARD -> BCM dönüşümü gerekirse)
+        if use_board_pins:
+            logger.info("BOARD pin numaralandırması kullanılıyor.")
+            
+            # BOARD pinlerini BCM pinlerine dönüştür
+            try:
+                left_in1_bcm = BOARD_TO_BCM.get(left_motor_pins[0])
+                left_in2_bcm = BOARD_TO_BCM.get(left_motor_pins[1])
+                right_in1_bcm = BOARD_TO_BCM.get(right_motor_pins[0])
+                right_in2_bcm = BOARD_TO_BCM.get(right_motor_pins[1])
+                left_en_bcm = BOARD_TO_BCM.get(left_pwm_pin)
+                right_en_bcm = BOARD_TO_BCM.get(right_pwm_pin)
+                
+                # Eğer dönüşüm tablosunda bulunmayan bir pin varsa uyarı ver
+                if None in [left_in1_bcm, left_in2_bcm, right_in1_bcm, right_in2_bcm, left_en_bcm, right_en_bcm]:
+                    logger.warning("Bazı BOARD pinleri BCM'e dönüştürülemedi!")
+                    logger.warning(f"Dönüştürülemeyen pinler: LEFT_IN1={left_motor_pins[0] if left_in1_bcm is None else ''}, "
+                                 f"LEFT_IN2={left_motor_pins[1] if left_in2_bcm is None else ''}, "
+                                 f"RIGHT_IN1={right_motor_pins[0] if right_in1_bcm is None else ''}, "
+                                 f"RIGHT_IN2={right_motor_pins[1] if right_in2_bcm is None else ''}, "
+                                 f"LEFT_EN={left_pwm_pin if left_en_bcm is None else ''}, "
+                                 f"RIGHT_EN={right_pwm_pin if right_en_bcm is None else ''}")
+            except Exception as e:
+                logger.error(f"Pin dönüşüm hatası: {e}")
+                raise
+        else:
+            logger.info("BCM pin numaralandırması kullanılıyor.")
+            left_in1_bcm = left_motor_pins[0]
+            left_in2_bcm = left_motor_pins[1]
+            right_in1_bcm = right_motor_pins[0]
+            right_in2_bcm = right_motor_pins[1]
+            left_en_bcm = left_pwm_pin
+            right_en_bcm = right_pwm_pin
+        
+        # Kullanılan pin numaralarını logla
+        logger.info(f"Sol motor BCM pinleri: IN1={left_in1_bcm}, IN2={left_in2_bcm}, EN={left_en_bcm}")
+        logger.info(f"Sağ motor BCM pinleri: IN1={right_in1_bcm}, IN2={right_in2_bcm}, EN={right_en_bcm}")
+        
+        # Motor kontrol ve PWM pinlerini tanımla
+        try:
+            # Motor kontrol pinleri
+            self.left_motor_in1 = OutputDevice(left_in1_bcm, active_high=True, initial_value=False)
+            self.left_motor_in2 = OutputDevice(left_in2_bcm, active_high=True, initial_value=False)
+            self.right_motor_in1 = OutputDevice(right_in1_bcm, active_high=True, initial_value=False)
+            self.right_motor_in2 = OutputDevice(right_in2_bcm, active_high=True, initial_value=False)
+            
+            # PWM pinleri
+            self.left_pwm = PWMOutputDevice(left_en_bcm, frequency=pwm_frequency, initial_value=0)
+            self.right_pwm = PWMOutputDevice(right_en_bcm, frequency=pwm_frequency, initial_value=0)
+            
+            logger.info("Motor pinleri başarıyla başlatıldı.")
+            
+        except Exception as e:
+            logger.error(f"Motor kontrol başlatma hatası: {e}")
+            self.cleanup()
+            raise
+        
+        # Başlangıç motor faktörleri - dengeli başlangıç
+        self.left_motor_factor = 0.95
+        self.right_motor_factor = 0.95
+        
+        # PID kontrol parametreleri - viraj dönüşleri için optimize edildi
+        self.kp = 0.5    # Orantısal katsayı - daha agresif tepki
+        self.ki = 0.001  # İntegral katsayı
+        self.kd = 0.25   # Türev katsayı - salınımları azaltmak için artırıldı
+        
+        # PID sınırları
+        self.kp_min, self.kp_max = 0.4, 0.8
+        self.ki_min, self.ki_max = 0.0005, 0.005
+        self.kd_min, self.kd_max = 0.2, 0.4
+        
         # Şerit takibi için parametreler
+        self.center_deadzone = 0.03  # Merkez toleransı - daha hassas
+        self.turn_speed_factor = 0.4  # Dönüş hızı faktörü - daha agresif dönüşler
+        
+        # Adaptif PID sistemi için parametreler
+        self.enable_adaptive_pid = True
+        self.performance_history = []
+        self.history_max_length = 50
+        self.error_history = []
+        self.pid_update_interval = 1.5  # Güncelleme aralığı azaltıldı
+        self.last_pid_update = time.time()  # PID güncelleme zamanı başlangıcı
+        
+        # PID ayarlama limitleri
+        self.kp_min, self.kp_max = 0.3, 0.8
+        self.ki_min, self.ki_max = 0.01, 0.1
+        self.kd_min, self.kd_max = 0.05, 0.3
+        
+        # PID sınır değerleri
+        self.max_integral = 50.0  # İntegral terimini daha fazla sınırla
+        
+        # Geliştirilmiş ramping (hız yumuşatma) mekanizması
+        # Daha yavaş ve yumuşak hız değişimi
+        self.max_accel = 0.05     # Hızlanma sınırı (bir adımda maksimum artış) - azaltıldı
+        self.max_decel = 0.08     # Yavaşlama sınırı (bir adımda maksimum azalış) - nispeten daha hızlı
+        self.prev_left_speed = 0.0  # Başlangıçta durgun
+        self.prev_right_speed = 0.0 # Başlangıçta durgun
+        self.prev_left_direction = 'stop'  # Başlangıçta durgun
+        self.prev_right_direction = 'stop' # Başlangıçta durgun
+        
+        # Yön değişimi zamanlaması
+        self.direction_change_delay = 0.1  # Yön değiştirme sırasında kısa bir bekleme (sn)
+        self.last_direction_change = 0     # Son yön değişikliği zamanı
+        
+        # PID hesaplaması için gerekli değişkenler
+        self.previous_error = 0
+        self.integral = 0
+        
+        # Son zamanlama (dt için)
+        self.last_time = time.time()
+        
+        # Şerit kaybı için sayaç
+        self.lost_lane_counter = 0
+        
         self.motor_speed_history = {'left': [], 'right': []}
         self.max_history_length = 50
         self.calibration_threshold = 20  # Kaç örnek toplandıktan sonra kalibrasyon yapılacak
@@ -124,7 +217,6 @@ class MotorController:
         
         logger.info("Motor kontrol modülü başlatıldı.")
         logger.info(f"Adaptif PID: {self.enable_adaptive_pid}, Başlangıç PID: kp={self.kp}, ki={self.ki}, kd={self.kd}")
-        logger.info(f"Motor faktörleri: Sol={self.left_motor_factor}, Sağ={self.right_motor_factor}")
     
     def _should_log(self):
         """
@@ -540,40 +632,33 @@ class MotorController:
         # PID düzeltmesini hesapla
         pid_correction = self.calculate_pid(center_diff)
         
-        # Temel hızları ayarla - motor faktörlerini uygula
-        base_speed_left = speed * self.left_motor_factor * 0.95  # Sol motor temel hızı
-        base_speed_right = speed * self.right_motor_factor * 0.95  # Sağ motor temel hızı
+        # Temel hızları ayarla - eşit başlangıç hızları
+        base_speed = speed * 0.9
         
         # Virajlarda daha agresif dönüş için sapma miktarına göre ek düzeltme faktörü
         extra_correction = 0
         if abs(center_diff) > 50:  # Büyük sapmalar için
-            extra_correction = 0.25  # Daha agresif
+            extra_correction = 0.2  # Daha agresif
         elif abs(center_diff) > 30:  # Orta sapmalar için
-            extra_correction = 0.18  # Daha fazla düzeltme
+            extra_correction = 0.15
         elif abs(center_diff) > 15:  # Küçük sapmalar için
-            extra_correction = 0.12  # Daha fazla düzeltme
+            extra_correction = 0.1
         
         # PID düzeltmesini uygula
         if abs(center_diff) < self.center_deadzone:
             # Merkeze çok yakınsa eşit hız
-            left_speed = base_speed_left
-            right_speed = base_speed_right
+            left_speed = base_speed
+            right_speed = base_speed
         else:
             # PID düzeltmesini hızlara uygula
             correction = (pid_correction * self.turn_speed_factor) + extra_correction
             
-            if center_diff < 0:  # Şerit solda, sola dönüş gerekiyor
-                # Sol motor yavaşlat, sağ motor hızlandır
-                left_speed = base_speed_left * (1 - abs(correction) * 1.5)  # Sol motor daha yavaş
-                right_speed = base_speed_right * (1 + abs(correction) * 1.2)  # Sağ motor daha hızlı
-                # Sola dönüşlerde sağ motor faktörünü biraz daha artır
-                right_speed *= 1.10  # Sağ motor daha güçlü olsun
-            else:  # Şerit sağda, sağa dönüş gerekiyor
-                # Sol motor hızlandır, sağ motor yavaşlat
-                left_speed = base_speed_left * (1 + abs(correction) * 1.2)  # Sol motor daha hızlı
-                right_speed = base_speed_right * (1 - abs(correction) * 1.5)  # Sağ motor daha yavaş
-                # Sağa dönüşlerde sol motor faktörünü biraz daha artır
-                left_speed *= 0.90  # Sol motor daha dengeli olsun
+            if center_diff < 0:  # Sola dönüş gerekiyor
+                left_speed = base_speed * (1 - abs(correction) * 1.5)  # Sol motor daha yavaş
+                right_speed = base_speed * (1 + abs(correction) * 1.2)  # Sağ motor daha hızlı
+            else:  # Sağa dönüş gerekiyor
+                left_speed = base_speed * (1 + abs(correction) * 1.2)  # Sol motor daha hızlı
+                right_speed = base_speed * (1 - abs(correction) * 1.5)  # Sağ motor daha yavaş
         
         # Hızları sınırla
         left_speed = max(min(left_speed, self.max_speed), self.min_motor_speed)
