@@ -19,27 +19,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MotorControl")
 
-# BOARD ve BCM pin numaralandırma dönüşüm tablosu
-# Bu tabloda BOARD pin numaralarının BCM karşılıkları bulunuyor
-BOARD_TO_BCM = {
-    3: 2, 5: 3, 7: 4, 8: 14, 10: 15, 11: 17, 12: 18, 13: 27,
-    15: 22, 16: 23, 18: 24, 19: 10, 21: 9, 22: 25, 23: 11,
-    24: 8, 26: 7, 29: 5, 31: 6, 32: 12, 33: 13, 35: 19, 36: 16,
-    37: 26, 38: 20, 40: 21
-}
-
 class MotorController:
     """
-    Motor kontrolünden sorumlu sınıf
+    Motor kontrolünden sorumlu sınıf - gpiozero kullanarak
     """
     def __init__(self, debug=False):
         # GPIO pinlerinin konfigurasyonu
-        self.in1_pin = 36  # Sağ motor ileri
-        self.in2_pin = 38  # Sağ motor geri
-        self.in3_pin = 16  # Sol motor ileri
-        self.in4_pin = 28  # Sol motor geri
-        self.en_a_pin = 32  # Sağ motor hız kontrolü
-        self.en_b_pin = 13  # Sol motor hız kontrolü
+        # Kullanıcı tarafından bildirilen pin numaraları:
+        self.right_enable_pin = 32  # Sağ motor PWM
+        self.right_forward_pin = 36  # Sağ motor ileri (in1)
+        self.right_backward_pin = 38  # Sağ motor geri (in2)
+        
+        self.left_enable_pin = 12  # Sol motor PWM
+        self.left_forward_pin = 16  # Sol motor ileri (in1)
+        self.left_backward_pin = 18  # Sol motor geri (in2)
         
         # Hız ve dönüş parametreleri
         self.base_speed = 50  # Temel ileri hız (0-100)
@@ -79,43 +72,45 @@ class MotorController:
         self.curve_start_time = 0
         self.curve_intensity = 0  # 0-1 arası değer
         
+        # GPIO bileşenleri
+        self.right_enable = None
+        self.right_forward = None
+        self.right_backward = None
+        self.left_enable = None
+        self.left_forward = None
+        self.left_backward = None
+        
         # GPIO ve PWM ayarları
         self._setup_gpio()
         
     def _setup_gpio(self):
-        """GPIO pinleri ve PWM ayarları"""
+        """gpiozero kütüphanesi ile GPIO pinleri ve PWM ayarları"""
         try:
-            import RPi.GPIO as GPIO
-            GPIO.setwarnings(False)
-            GPIO.setmode(GPIO.BCM)
+            # Motor kontrol pinlerini ayarla
+            self.right_enable = PWMOutputDevice(self.right_enable_pin)
+            self.right_forward = OutputDevice(self.right_forward_pin)
+            self.right_backward = OutputDevice(self.right_backward_pin)
             
-            # Pin modlarını ayarla
-            pins = [self.in1_pin, self.in2_pin, self.in3_pin, self.in4_pin, self.en_a_pin, self.en_b_pin]
-            for pin in pins:
-                GPIO.setup(pin, GPIO.OUT)
-                GPIO.output(pin, GPIO.LOW)
+            self.left_enable = PWMOutputDevice(self.left_enable_pin)
+            self.left_forward = OutputDevice(self.left_forward_pin)
+            self.left_backward = OutputDevice(self.left_backward_pin)
             
-            # PWM pin ayarları
-            self.right_pwm = GPIO.PWM(self.en_a_pin, 100)
-            self.left_pwm = GPIO.PWM(self.en_b_pin, 100)
-            self.right_pwm.start(0)
-            self.left_pwm.start(0)
+            # Motorları durdur
+            self.right_enable.value = 0
+            self.left_enable.value = 0
+            self.right_forward.off()
+            self.right_backward.off()
+            self.left_forward.off()
+            self.left_backward.off()
             
             if self.debug:
                 print("GPIO kurulumu tamamlandı")
                 
-        except ImportError:
-            # Raspberry Pi dışında çalıştırıldığında
-            if self.debug:
-                print("GPIO kütüphanesi bulunamadı - Simülasyon modunda çalışılıyor")
-            self.right_pwm = None
-            self.left_pwm = None
-        
         except Exception as e:
             if self.debug:
                 print(f"GPIO kurulumunda hata: {e}")
-            self.right_pwm = None
-            self.left_pwm = None
+            self.right_enable = None
+            self.left_enable = None
         
     def calculate_pid(self, center_diff, frame_width):
         """
@@ -310,7 +305,7 @@ class MotorController:
     
     def set_motors(self, left_speed, right_speed):
         """
-        Motor hızlarını ve yönlerini ayarlar
+        Motor hızlarını ve yönlerini ayarlar - gpiozero kullanarak
         
         Args:
             left_speed (int): Sol motor hızı (-100 ile 100 arasında, negatif geri)
@@ -321,33 +316,35 @@ class MotorController:
         right_speed = max(-100, min(100, right_speed))
         
         try:
-            import RPi.GPIO as GPIO
+            # Motorların doğru çalışıp çalışmayacağını kontrol et
+            if self.right_enable is None or self.left_enable is None:
+                if self.debug:
+                    print("GPIO pinleri başlatılmadı, motor kontrolü geçersiz.")
+                return
             
             # Sol motor yönü
             if left_speed >= 0:  # İleri
-                GPIO.output(self.in3_pin, GPIO.HIGH)
-                GPIO.output(self.in4_pin, GPIO.LOW)
-                left_pwm_value = abs(left_speed)
+                self.left_forward.on()
+                self.left_backward.off()
+                left_pwm_value = abs(left_speed) / 100.0  # 0-1 arası değer
             else:  # Geri
-                GPIO.output(self.in3_pin, GPIO.LOW)
-                GPIO.output(self.in4_pin, GPIO.HIGH)
-                left_pwm_value = abs(left_speed)
+                self.left_forward.off()
+                self.left_backward.on()
+                left_pwm_value = abs(left_speed) / 100.0
             
             # Sağ motor yönü
             if right_speed >= 0:  # İleri
-                GPIO.output(self.in1_pin, GPIO.HIGH)
-                GPIO.output(self.in2_pin, GPIO.LOW)
-                right_pwm_value = abs(right_speed)
+                self.right_forward.on()
+                self.right_backward.off()
+                right_pwm_value = abs(right_speed) / 100.0
             else:  # Geri
-                GPIO.output(self.in1_pin, GPIO.LOW)
-                GPIO.output(self.in2_pin, GPIO.HIGH)
-                right_pwm_value = abs(right_speed)
+                self.right_forward.off()
+                self.right_backward.on()
+                right_pwm_value = abs(right_speed) / 100.0
             
-            # PWM ile hız kontrolü
-            if self.left_pwm is not None:
-                self.left_pwm.ChangeDutyCycle(left_pwm_value)
-            if self.right_pwm is not None:
-                self.right_pwm.ChangeDutyCycle(right_pwm_value)
+            # PWM ile hız kontrolü (0-1 arası değerler)
+            self.left_enable.value = left_pwm_value
+            self.right_enable.value = right_pwm_value
             
             if self.debug:
                 print(f"Motor hızları ayarlandı: sol={left_speed}, sağ={right_speed}")
@@ -359,17 +356,21 @@ class MotorController:
     def stop(self):
         """Motorları durdurur"""
         try:
-            if self.left_pwm is not None and self.right_pwm is not None:
-                self.left_pwm.ChangeDutyCycle(0)
-                self.right_pwm.ChangeDutyCycle(0)
+            if self.right_enable is not None and self.left_enable is not None:
+                # PWM'leri sıfırla
+                self.right_enable.value = 0
+                self.left_enable.value = 0
                 
-            import RPi.GPIO as GPIO
-            GPIO.output(self.in1_pin, GPIO.LOW)
-            GPIO.output(self.in2_pin, GPIO.LOW)
-            GPIO.output(self.in3_pin, GPIO.LOW)
-            GPIO.output(self.in4_pin, GPIO.LOW)
-            
-            self.running = False
+                # Yön pinlerini kapat
+                self.right_forward.off()
+                self.right_backward.off()
+                self.left_forward.off()
+                self.left_backward.off()
+                
+                self.running = False
+                
+                if self.debug:
+                    print("Motorlar durduruldu")
             
         except Exception as e:
             if self.debug:
@@ -380,13 +381,19 @@ class MotorController:
         try:
             self.stop()
             
-            if self.left_pwm is not None:
-                self.left_pwm.stop()
-            if self.right_pwm is not None:
-                self.right_pwm.stop()
-                
-            import RPi.GPIO as GPIO
-            GPIO.cleanup()
+            # Tüm GPIO bileşenlerini kapat
+            if self.right_enable is not None:
+                self.right_enable.close()
+            if self.right_forward is not None:
+                self.right_forward.close()
+            if self.right_backward is not None:
+                self.right_backward.close()
+            if self.left_enable is not None:
+                self.left_enable.close()
+            if self.left_forward is not None:
+                self.left_forward.close()
+            if self.left_backward is not None:
+                self.left_backward.close()
             
             if self.debug:
                 print("GPIO pinleri temizlendi")
