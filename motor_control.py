@@ -622,54 +622,59 @@ class MotorController:
                     logger.warning(f"Şerit kaybedildi ({self.lost_lane_counter}), kurtarma modu aktif...")
                 
                 # Şerit kaybedildiğinde son bilinen yöne devam et
-                recovery_speed = self.default_speed * 0.75  # Kurtarma modunda daha düşük hız
+                recovery_speed = self.default_speed * 0.7  # Kurtarma modunda daha düşük hız
                 
                 # Önceki hatanın büyüklüğüne göre farklı stratejiler uygula
                 if self.previous_error > 20:  # Önemli sağa sapma
                     # Son bilinen sapma sağa ise, sola dön (daha agresif)
                     left_speed = self.min_motor_speed * 0.7
-                    right_speed = recovery_speed * 1.2
+                    right_speed = recovery_speed * 1.0
                     logger.debug("Kurtarma: Sola dönüş (agresif)")
                 elif self.previous_error < -20:  # Önemli sola sapma
                     # Son bilinen sapma sola ise, sağa dön (daha agresif)
-                    left_speed = recovery_speed * 1.2
+                    left_speed = recovery_speed * 1.0
                     right_speed = self.min_motor_speed * 0.7
                     logger.debug("Kurtarma: Sağa dönüş (agresif)")
                 elif self.previous_error > 5:  # Hafif sağa sapma
                     # Hafif sola dön
-                    left_speed = self.min_motor_speed * 0.9
+                    left_speed = self.min_motor_speed * 0.8
                     right_speed = recovery_speed
                     logger.debug("Kurtarma: Sola dönüş (hafif)")
                 elif self.previous_error < -5:  # Hafif sola sapma
                     # Hafif sağa dön
                     left_speed = recovery_speed
-                    right_speed = self.min_motor_speed * 0.9
+                    right_speed = self.min_motor_speed * 0.8
                     logger.debug("Kurtarma: Sağa dönüş (hafif)")
                 else:
                     # Sapma yoksa, zigzag arama modeli uygula
                     # Belirli aralıklarla yön değiştirerek şeridi bulmaya çalış
-                    search_cycle = (self.lost_lane_counter - 10) % 40
-                    if search_cycle < 10:  # İlk 10 adım sola dön
+                    search_cycle = (self.lost_lane_counter - 10) % 60  # Daha uzun döngü
+                    
+                    if search_cycle < 15:  # İlk 15 adım düz git
+                        left_speed = recovery_speed * 0.9
+                        right_speed = recovery_speed * 0.9
+                        logger.debug("Kurtarma: Düz ilerleme")
+                    elif search_cycle < 30:  # Sonraki 15 adım sola dön
                         left_speed = self.min_motor_speed * 0.8
                         right_speed = recovery_speed
                         logger.debug("Kurtarma: Arama - sola dönüş")
-                    elif search_cycle < 30:  # Sonraki 20 adım sağa dön
+                    elif search_cycle < 45:  # Sonraki 15 adım düz git
+                        left_speed = recovery_speed * 0.9
+                        right_speed = recovery_speed * 0.9
+                        logger.debug("Kurtarma: Düz ilerleme")
+                    else:  # Son 15 adım sağa dön
                         left_speed = recovery_speed
                         right_speed = self.min_motor_speed * 0.8
                         logger.debug("Kurtarma: Arama - sağa dönüş")
-                    else:  # Son 10 adım sola dön
-                        left_speed = self.min_motor_speed * 0.8
-                        right_speed = recovery_speed
-                        logger.debug("Kurtarma: Arama - sola dönüş")
                 
                 # Uzun süre şerit bulunamazsa hızı kademeli olarak azalt
-                if self.lost_lane_counter > 50:
-                    slowdown_factor = max(0.5, 1.0 - (self.lost_lane_counter - 50) / 200)
+                if self.lost_lane_counter > 100:  # Daha uzun süre bekle
+                    slowdown_factor = max(0.5, 1.0 - (self.lost_lane_counter - 100) / 300)
                     left_speed *= slowdown_factor
                     right_speed *= slowdown_factor
                     
                     # Çok uzun süre şerit bulunamazsa dur (güvenlik önlemi)
-                    if self.lost_lane_counter > 150:
+                    if self.lost_lane_counter > 300:  # Çok daha uzun süre bekle
                         logger.warning("Şerit çok uzun süre bulunamadı, durduruluyor!")
                         self.stop()
                         return
@@ -680,20 +685,22 @@ class MotorController:
                 return
             return
         else:
-            self.lost_lane_counter = 0
-        
+            # Şerit tekrar bulundu, sayacı yavaşça azalt
+            if self.lost_lane_counter > 0:
+                self.lost_lane_counter = max(0, self.lost_lane_counter - 5)  # Daha hızlı azalt
+            
         # PID düzeltmesini hesapla
         pid_correction = self.calculate_pid(center_diff)
         
         # Temel hızları ayarla - eşit başlangıç hızları
-        base_speed = speed * 0.9
+        base_speed = speed * 0.85  # Daha düşük baz hız
         
         # Virajlarda daha agresif dönüş için sapma miktarına göre ek düzeltme faktörü
         extra_correction = 0
         if abs(center_diff) > 50:  # Büyük sapmalar için
-            extra_correction = 0.2
-        elif abs(center_diff) > 30:  # Orta sapmalar için
             extra_correction = 0.15
+        elif abs(center_diff) > 30:  # Orta sapmalar için
+            extra_correction = 0.1
         
         # PID düzeltmesini uygula
         if abs(center_diff) < self.center_deadzone:
@@ -705,14 +712,14 @@ class MotorController:
             correction = (pid_correction * self.turn_speed_factor) + extra_correction
             
             # Güvenlik için correction değerini sınırla
-            correction = max(-0.8, min(0.8, correction))
+            correction = max(-0.7, min(0.7, correction))
             
             if center_diff < 0:  # Sola dönüş gerekiyor
-                left_speed = base_speed * (1 - abs(correction) * 1.2)  # Sol motor daha yavaş
+                left_speed = base_speed * (1 - abs(correction) * 1.1)  # Sol motor daha yavaş
                 right_speed = base_speed * (1 + abs(correction) * 0.9)  # Sağ motor daha hızlı
             else:  # Sağa dönüş gerekiyor
                 left_speed = base_speed * (1 + abs(correction) * 0.9)  # Sol motor daha hızlı
-                right_speed = base_speed * (1 - abs(correction) * 1.2)  # Sağ motor daha yavaş
+                right_speed = base_speed * (1 - abs(correction) * 1.1)  # Sağ motor daha yavaş
         
         # Hızları sınırla
         left_speed = max(min(left_speed, self.max_speed), self.min_motor_speed)
