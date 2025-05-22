@@ -25,437 +25,452 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MainControl")
 
-class AutonomousVehicle:
-    def __init__(self, camera_resolution=(320, 240), camera_framerate=30, calibration_file="serit_kalibrasyon.json", debug=False):
+class OtonomArac:
+    """
+    Otonom araç ana kontrol sınıfı
+    """
+    def __init__(self, 
+                 camera_resolution=(640, 480),
+                 framerate=30,
+                 debug=False,
+                 debug_fps=10,
+                 left_motor_pins=(16, 18),    # Sol motor IN1, IN2 pinleri
+                 right_motor_pins=(36, 38),   # Sağ motor IN1, IN2 pinleri
+                 left_pwm_pin=12,             # Sol motor Enable pini
+                 right_pwm_pin=32,            # Sağ motor Enable pini
+                 use_board_pins=True,         # BOARD pin numaralandırması kullan
+                 calibration_file="serit_kalibrasyon.json"):  # Kalibrasyon dosyası yolu
         """
-        Ana kontrol sınıfı - araç davranışını yönetir
+        OtonomArac sınıfını başlatır.
         
         Args:
             camera_resolution (tuple): Kamera çözünürlüğü (genişlik, yükseklik)
-            camera_framerate (int): Kamera FPS değeri
+            framerate (int): Kare hızı (fps)
+            debug (bool): Hata ayıklama modu
+            debug_fps (int): Debug modunda gösterilecek maksimum fps
+            left_motor_pins (tuple): Sol motor pinleri (IN1, IN2)
+            right_motor_pins (tuple): Sağ motor pinleri (IN1, IN2)
+            left_pwm_pin (int): Sol motor Enable pini
+            right_pwm_pin (int): Sağ motor Enable pini
+            use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
             calibration_file (str): Kalibrasyon dosyası yolu
-            debug (bool): Debug modu açık/kapalı
         """
-        self.camera_resolution = camera_resolution
-        self.camera_framerate = camera_framerate
-        self.calibration_file = calibration_file
         self.debug = debug
-        
-        # Sistem durumu
+        self.debug_fps = debug_fps
         self.running = False
-        self.mode = "lane_following"  # lane_following, manual, obstacle_avoidance
+        self.camera_resolution = camera_resolution
+        self.framerate = framerate
+        self.camera = None  # Başlangıçta None olarak tanımla
+        self.calibration_file = calibration_file  # Kalibrasyon dosyası yolunu sakla
         
-        # Bileşenleri başlat
-        self.camera = None
-        self.lane_detector = None
-        self.motor_controller = None
-        
-        # Hata yönetimi
-        self.error_counter = 0
-        self.max_consecutive_errors = 5
-        self.restart_delay = 3  # saniye
-        self.last_error_time = 0
-        self.last_frame_time = 0
-        self.frame_timeout = 1.0  # saniye
-        
-        # Performans metrikler
-        self.fps = 0
-        self.process_time = 0
-        self.frame_count = 0
-        self.last_fps_update = time.time()
-        
-        # Viraj durumu
-        self.in_curve = False
-        self.curve_direction = "none"
-        
-        # Shutting down 
-        self.is_shutting_down = False
-        
-        logging.basicConfig(
-            level=logging.DEBUG if debug else logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-    def _initialize_components(self):
-        """Bileşenleri başlatır"""
+        # Modülleri başlatma denemesi - hata durumunda güvenli kapatma
         try:
-            # Lane detector'ı başlat
-            self.lane_detector = LaneDetector(camera_resolution=self.camera_resolution, debug=self.debug)
+            # Kamera başlatma - güvenli başlatma için try-except kullan
+            self._initialize_camera()
             
-            # Kalibrasyon dosyasını yükle
-            self._load_calibration()
+            # Şerit tespit modülünü başlat
+            logger.info("Şerit tespit modülü başlatılıyor...")
+            self.lane_detector = LaneDetector(camera_resolution=camera_resolution, debug=debug)
             
-            # Motor kontrolcüsünü başlat
-            self.motor_controller = MotorController(debug=self.debug)
+            # Kalibrasyon dosyasını yükle (varsa)
+            if os.path.exists(self.calibration_file):
+                logger.info(f"Kalibrasyon dosyası yükleniyor: {self.calibration_file}")
+                self._load_calibration()
+            else:
+                logger.warning(f"Kalibrasyon dosyası bulunamadı: {self.calibration_file}")
+                logger.warning("Varsayılan değerler kullanılacak.")
             
-            return True
-            
+            # Motor kontrol modülünü başlat
+            logger.info("Motor kontrol modülü başlatılıyor...")
+            self.motor_controller = MotorController(
+                left_motor_pins=left_motor_pins,
+                right_motor_pins=right_motor_pins,
+                left_pwm_pin=left_pwm_pin,
+                right_pwm_pin=right_pwm_pin,
+                max_speed=0.7,  # Daha düşük maksimum hız (aşırı ısınmayı önlemek için)
+                default_speed=0.35,  # Daha düşük varsayılan hız (aşırı ısınmayı önlemek için)
+                use_board_pins=use_board_pins,
+                pwm_frequency=50  # PWM frekansını düşürdük - aşırı ısınmayı azaltmak için
+            )
+        
         except Exception as e:
-            logging.error(f"Bileşenleri başlatırken hata: {e}")
-            return False
+            logger.error(f"Başlatma hatası: {e}")
+            # Kısmi başlatılmış kaynakları temizle
+            self.cleanup()
+            raise
             
+        # Temiz kapatma için sinyal yakalama
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        
+        # FPS ölçümü için değişkenler
+        self.fps = 0
+        self.frame_count = 0
+        self.fps_start_time = 0
+        
+        logger.info("Otonom araç başlatıldı.")
+    
     def _initialize_camera(self):
-        """Kamera bağlantısını başlatır"""
+        """
+        Kamera modülünü başlatır ve yapılandırır
+        """
         try:
-            from picamera2 import Picamera2
-            
-            # Kamera nesnesini oluştur
+            logger.info("Kamera başlatılıyor...")
             self.camera = Picamera2()
             
-            # Kamera konfigürasyonu
-            config = self.camera.create_video_configuration(
+            # Kamera yapılandırması - daha detaylı
+            preview_config = self.camera.create_preview_configuration(
                 main={"size": self.camera_resolution, "format": "RGB888"},
-                controls={
-                    "FrameRate": self.camera_framerate,
-                    "ExposureTime": 15000,  # Daha kısa pozlama süresi (mikrosaniye)
-                    "AnalogueGain": 1.5,    # Işık hassasiyeti
-                    "Sharpness": 2.5,       # Keskinlik arttırıldı
-                    "Brightness": 0.1,      # Parlaklık biraz arttırıldı
-                    "Contrast": 1.2,        # Kontrast arttırıldı
-                    "Saturation": 1.3,      # Doygunluk arttırıldı
-                    "NoiseReductionMode": 2  # Gürültü azaltma - Fast
-                }
+                lores={"size": (320, 240), "format": "YUV420"},
+                display="lores",
+                buffer_count=4  # Buffer sayısını artır
             )
+            self.camera.configure(preview_config)
             
-            self.camera.configure(config)
+            # Kamera özel ayarlarını düzenleme
+            try:
+                controls = {
+                    "AwbEnable": True,          # Otomatik beyaz dengesi
+                    "AeEnable": True,           # Otomatik pozlama
+                    "ExposureTime": 10000,      # Pozlama süresi (mikrosaniye)
+                    "AnalogueGain": 1.0,        # Analog kazanç
+                    "Brightness": 0.0,          # Parlaklık
+                    "Contrast": 1.0,            # Kontrast
+                    "Sharpness": 1.0,           # Keskinlik
+                    "NoiseReductionMode": 1     # Gürültü azaltma
+                }
+                self.camera.set_controls(controls)
+                logger.info("Kamera kontrolleri ayarlandı")
+            except Exception as e:
+                logger.warning(f"Kamera kontrolleri ayarlanırken hata: {e}")
+            
+            # Kamerayı başlat
             self.camera.start()
             
-            # Kameranın ısınması için bekle
-            time.sleep(0.5)
-            
-            # Test karesi al
-            test_frame = self.camera.capture_array()
-            if test_frame is None or test_frame.size == 0:
-                raise Exception("Kamera test karesi alınamadı")
-                
-            logging.info(f"Kamera başlatıldı: {self.camera_resolution[0]}x{self.camera_resolution[1]}@{self.camera_framerate}fps")
-            return True
-            
-        except ImportError:
-            logging.error("PiCamera2 kütüphanesi bulunamadı - kamera devre dışı")
-            return False
-            
-        except Exception as e:
-            logging.error(f"Kamera başlatma hatası: {e}")
-            return False
-            
-    def _load_calibration(self):
-        """Kalibrasyon dosyasını yükler"""
-        try:
-            import json
-            import numpy as np
-            import os
-            
-            # Kalibrasyon dosyası var mı kontrol et
-            if not os.path.exists(self.calibration_file):
-                logging.warning(f"Kalibrasyon dosyası bulunamadı: {self.calibration_file}")
-                return False
-            
-            # Kalibrasyon dosyasını oku
-            with open(self.calibration_file, 'r') as f:
-                calib_data = json.load(f)
-            
-            # Kalibrasyon_optimize.py formatını kontrol et
-            if 'src_points' in calib_data and 'dst_points' in calib_data:
-                logging.info("kalibrasyon_optimize.py formatında kalibrasyon dosyası yüklendi")
-                
-                # Kalibrasyon verisini doğrudan lane_detector'a yükle
-                if self.lane_detector.load_calibration(self.calibration_file):
-                    logging.info(f"Kalibrasyon dosyası başarıyla yüklendi: {self.calibration_file}")
-                    
-                    # Kalibrasyon çözünürlüğünü kontrol et
-                    if 'resolution' in calib_data:
-                        calib_res = calib_data['resolution']
-                        if calib_res != self.camera_resolution:
-                            logging.warning(f"Kalibrasyon çözünürlüğü ({calib_res[0]}x{calib_res[1]}) ve " +
-                                         f"kamera çözünürlüğü ({self.camera_resolution[0]}x{self.camera_resolution[1]}) farklı!")
-                    return True
-            else:
-                # Eski format dosya - lane_detector.load_calibration kullan
-                if self.lane_detector.load_calibration(self.calibration_file):
-                    logging.info(f"Eski format kalibrasyon dosyası başarıyla yüklendi: {self.calibration_file}")
-                    return True
-                else:
-                    logging.error(f"Eski format kalibrasyon dosyası yüklenemedi: {self.calibration_file}")
-            
-            return False
-            
-        except Exception as e:
-            logging.error(f"Kalibrasyon yükleme hatası: {e}")
-            return False
-            
-    def process_frame(self, frame):
-        """Bir kareyi işler ve motor komutlarını günceller"""
-        try:
-            start_time = time.time()
-            
-            # Şerit tespiti
-            processed_frame, center_diff = self.lane_detector.process_frame(frame)
-            
-            if self.debug:
-                # FPS hesapla
-                self.frame_count += 1
-                if time.time() - self.last_fps_update >= 1.0:  # Her 1 saniyede bir FPS güncelle
-                    self.fps = self.frame_count
-                    self.frame_count = 0
-                    self.last_fps_update = time.time()
-                
-                # FPS göster
-                cv2.putText(processed_frame, f"FPS: {self.fps}",
-                          (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                
-                # İşleme süresi
-                process_time = time.time() - start_time
-                cv2.putText(processed_frame, f"Process: {process_time*1000:.1f}ms",
-                          (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            
-            # Motor kontrolü - moduna göre
-            if self.mode == "lane_following":
-                # Lane detector'dan viraj durumunu oku
-                self.in_curve = self.lane_detector.is_curve
-                self.curve_direction = self.lane_detector.curve_direction
-                
-                # Şerit takibi yap - viraj tespiti ile birlikte
-                left_speed, right_speed = self.motor_controller.follow_lane(
-                    center_diff, self.camera_resolution[0], self.lane_detector)
-                
-                # Motorları kontrol et
-                self.motor_controller.set_motors(left_speed, right_speed)
-                
-            elif self.mode == "manual":
-                # Manuel kontrol - burada bir şey yapmıyoruz, dışarıdan kontrol ediliyor
-                pass
-                
-            elif self.mode == "obstacle_avoidance":
-                # Engel tespit ve kaçınma modu - şimdilik eklenmedi
-                pass
-                
-            # İşlem zamanını kaydet
-            self.process_time = time.time() - start_time
-            
-            return processed_frame
-            
-        except Exception as e:
-            logging.error(f"Kare işleme hatası: {e}")
-            self.error_counter += 1
-            return None
-            
-    def start(self):
-        """Sistemi başlatır"""
-        if self.running:
-            logging.warning("Sistem zaten çalışıyor")
-            return False
-            
-        logging.info("Sistem başlatılıyor...")
-        
-        # Bileşenleri başlat
-        while True:
-            try:
-                if not self._initialize_components():
-                    logging.error("Bileşenler başlatılamadı, yeniden deneniyor...")
-                    time.sleep(1)
-                    continue
-                
-                if not self._initialize_camera():
-                    logging.error("Kamera başlatılamadı, yeniden deneniyor...")
-                    time.sleep(1)
-                    continue
-                
-                break  # Başarıyla başlatıldıysa döngüden çık
-                
-            except Exception as e:
-                logging.error(f"Başlatma hatası: {e}")
-                time.sleep(1)  # Biraz bekle ve yeniden dene
-        
-        self.running = True
-        self.error_counter = 0
-        self.is_shutting_down = False
-        
-        # Ana döngü
-        try:
-            logging.info("Sistem başlatıldı, ana döngü başlıyor...")
-            
-            while self.running and not self.is_shutting_down:
+            # Test görüntüsü al
+            logger.info("Kamera test ediliyor...")
+            for _ in range(3):  # 3 kere dene
                 try:
-                    frame_start_time = time.time()
-                    
-                    # Kamera karesi al
-                    if self.camera is None:
-                        raise Exception("Kamera başlatılmadı")
-                        
-                    frame = self.camera.capture_array()
-                    
-                    if frame is None or frame.size == 0:
-                        raise Exception("Boş kare alındı")
-                        
-                    # Kareyi işle
-                    processed_frame = self.process_frame(frame)
-                    
-                    # Hata sayacını sıfırla veya artır
-                    if processed_frame is not None:
-                        self.error_counter = max(0, self.error_counter - 1)  # Hatalar varsa kademeli olarak azalt
-                    else:
-                        self.error_counter += 1
-                        logging.warning(f"İşleme hatası: {self.error_counter}/{self.max_consecutive_errors}")
-                        
-                    # Hata kontrolleri
-                    if self.error_counter > self.max_consecutive_errors:
-                        logging.error(f"Maksimum ardışık hata sayısına ulaşıldı ({self.max_consecutive_errors}), yeniden başlatılıyor...")
-                        self._handle_critical_error()
+                    test_frame = self.camera.capture_array()
+                    if test_frame is not None and test_frame.size > 0:
+                        logger.info(f"Kamera test başarılı. Görüntü boyutu: {test_frame.shape}")
                         break
-                        
-                    # Uzun süre kare alınamazsa hataya düş
-                    if time.time() - frame_start_time > self.frame_timeout:
-                        logging.error(f"Kare işleme zaman aşımı: {time.time() - frame_start_time:.2f}s")
-                        self.error_counter += 1
+                except Exception as e:
+                    logger.warning(f"Test görüntüsü alınamadı, tekrar deneniyor: {e}")
+                time.sleep(0.5)
+            
+            # Kameranın dengelenmesi için bekle
+            logger.info("Kamera dengeleniyor...")
+            time.sleep(2)
+            
+            logger.info("Kamera başarıyla başlatıldı.")
+            
+        except Exception as e:
+            logger.error(f"Kamera başlatma hatası: {e}")
+            if hasattr(self, 'camera') and self.camera is not None:
+                self.camera.close()
+            raise
+    
+    def signal_handler(self, sig, frame):
+        """
+        Sinyal yakalama işleyicisi (CTRL+C gibi)
+        """
+        logger.info("Kapatma sinyali alındı, temizleniyor...")
+        self.cleanup()
+        sys.exit(0)
+    
+    def start(self):
+        """
+        Otonom araç sürüş döngüsünü başlatır
+        """
+        if self.running:
+            logger.warning("Araç zaten çalışıyor!")
+            return
+        
+        logger.info("Otonom sürüş başlatılıyor...")
+        self.running = True
+        
+        # Hata sayacı ve yeniden başlatma değişkenleri
+        error_count = 0
+        max_consecutive_errors = 5
+        restart_delay = 3.0  # saniye
+        last_error_time = 0
+        
+        try:
+            # Kamera başlatma ve yapılandırma
+            if self.camera is None:
+                self._initialize_camera()
+            
+            # FPS hesaplama değişkenlerini başlat
+            self.fps_start_time = time.time()
+            self.frame_count = 0
+            
+            # Debug modu için pencere oluştur
+            if self.debug:
+                cv2.namedWindow("Otonom Arac", cv2.WINDOW_NORMAL)
+                cv2.setWindowTitle("Otonom Arac", "Otonom Arac - Serit Tespiti")
+                cv2.resizeWindow("Otonom Arac", self.camera_resolution[0], self.camera_resolution[1])
+            
+            # Debug modunda son frame update zamanı
+            last_debug_update = 0
+            debug_frame_interval = 1.0 / self.debug_fps if self.debug_fps > 0 else 0
+            
+            # Görüntü işleme döngüsü
+            while self.running:
+                try:
+                    # Kameradan görüntü al
+                    frame = self.camera.capture_array()
+                    if frame is None or frame.size == 0:
+                        raise Exception("Geçersiz kamera görüntüsü")
+                    
+                    # BGR'ye dönüştür (OpenCV için)
+                    if len(frame.shape) == 3 and frame.shape[2] == 3:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    
+                    # Görüntüyü işle ve şeritleri tespit et
+                    processed_frame, center_diff = self.lane_detector.process_frame(frame)
+                    
+                    # Şeritlere göre motoru kontrol et
+                    self.motor_controller.follow_lane(center_diff)
+                    
+                    # FPS hesapla
+                    self.frame_count += 1
+                    elapsed_time = time.time() - self.fps_start_time
+                    if elapsed_time >= 1.0:
+                        self.fps = self.frame_count / elapsed_time
+                        self.fps_start_time = time.time()
+                        self.frame_count = 0
+                        logger.debug(f"FPS: {self.fps:.1f}")
                     
                     # Debug modunda görüntüyü göster
-                    if self.debug and processed_frame is not None:
-                        cv2.imshow("Lane Detection", processed_frame)
-                        key = cv2.waitKey(1) & 0xFF
-                        
-                        # Klavye kontrolü (ESC=çıkış)
-                        if key == 27:  # ESC
-                            logging.info("Kullanıcı tarafından durduruldu (ESC)")
-                            self.running = False
-                            break
+                    if self.debug:
+                        current_time = time.time()
+                        if current_time - last_debug_update >= debug_frame_interval:
+                            # FPS bilgisini görüntüye ekle
+                            cv2.putText(processed_frame, f"FPS: {self.fps:.1f}", 
+                                      (processed_frame.shape[1] - 120, 30), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                             
+                            # Görüntüyü göster
+                            cv2.imshow("Otonom Arac", processed_frame)
+                            last_debug_update = current_time
+                            
+                            # Tuş kontrolü
+                            key = cv2.waitKey(1) & 0xFF
+                            if key == ord('q'):
+                                logger.info("Kullanıcı tarafından durduruldu")
+                                self.running = False
+                                break
+                            elif key == ord('s'):
+                                filename = f"screenshot_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+                                cv2.imwrite(filename, processed_frame)
+                                logger.info(f"Ekran görüntüsü kaydedildi: {filename}")
+                    
                 except KeyboardInterrupt:
-                    logging.info("Klavye kesintisi - durduruldu")
+                    logger.info("Kullanıcı tarafından durduruldu (CTRL+C)")
                     self.running = False
                     break
                     
                 except Exception as e:
-                    logging.error(f"Ana döngüde beklenmeyen hata: {e}")
-                    self.error_counter += 1
-                    time.sleep(0.5)  # Hata sonrası kısa bir bekleme
-                
+                    error_count += 1
+                    current_time = time.time()
+                    
+                    # Son hata üzerinden yeterli süre geçtiyse sayacı sıfırla
+                    if current_time - last_error_time > 10.0:
+                        error_count = 0
+                    
+                    last_error_time = current_time
+                    logger.error(f"Kare işleme hatası ({error_count}/{max_consecutive_errors}): {e}")
+                    
+                    if error_count >= max_consecutive_errors:
+                        logger.critical("Çok fazla ardışık hata! Yeniden başlatılıyor...")
+                        self.cleanup()
+                        time.sleep(restart_delay)
+                        error_count = 0
+                        continue
+        
         except Exception as e:
-            logging.error(f"Ana döngüde kritik hata: {e}")
-            
+            logger.error(f"Ana döngü hatası: {e}")
+        
         finally:
-            # Temizlik işlemleri
-            self._cleanup()
-            
-        return True
-        
-    def _handle_critical_error(self):
-        """Kritik bir hata durumunda sistemi güvenli şekilde yeniden başlatır"""
-        logging.warning("Kritik hata işleniyor - sistemi yeniden başlatma...")
-        
-        try:
-            # Motorları durdur
-            if self.motor_controller:
-                self.motor_controller.stop()
-                
-            # Kamerayı kapat
-            if self.camera:
-                try:
-                    self.camera.stop()
-                    self.camera.close()
-                except:
-                    pass
-                self.camera = None
-                
-            # Bekleme süresi
-            logging.info(f"{self.restart_delay} saniye bekleniyor...")
-            time.sleep(self.restart_delay)
-            
-            # Sayaçları sıfırla
-            self.error_counter = 0
-            
-            # Yeniden başlat
-            logging.info("Sistem yeniden başlatılıyor...")
-            self._initialize_components()
-            self._initialize_camera()
-            
-        except Exception as e:
-            logging.error(f"Yeniden başlatma hatası: {e}")
-            self.running = False
-            
+            self.cleanup()
+            logger.info("Program sonlandırıldı.")
+    
     def stop(self):
-        """Sistemi durdurur"""
-        logging.info("Sistem durduruluyor...")
+        """
+        Otonom aracı durdurur
+        """
         self.running = False
-        self.is_shutting_down = True
-        
-    def _cleanup(self):
-        """Kaynakları temizler"""
-        logging.info("Sistem kaynakları temizleniyor...")
+        logger.info("Otonom sürüş durduruldu.")
+    
+    def cleanup(self):
+        """
+        Kaynakları temizler ve kapatır
+        """
+        logger.info("Temizleme yapılıyor...")
         
         # Motorları durdur
-        try:
-            if self.motor_controller:
-                self.motor_controller.stop()
-                self.motor_controller.cleanup()
-                self.motor_controller = None
-        except Exception as e:
-            logging.error(f"Motor temizleme hatası: {e}")
+        if hasattr(self, 'motor_controller'):
+            self.motor_controller.stop()
+            self.motor_controller.cleanup()
         
         # Kamerayı kapat
-        try:
-            if self.camera:
+        if hasattr(self, 'camera') and self.camera is not None:
+            try:
                 self.camera.stop()
-                self.camera.close()
-                self.camera = None
-        except Exception as e:
-            logging.error(f"Kamera temizleme hatası: {e}")
+            except:
+                pass
         
         # OpenCV pencerelerini kapat
-        try:
+        if self.debug:
             cv2.destroyAllWindows()
-        except:
-            pass
+        
+        logger.info("Temizleme tamamlandı.")
+
+    def _load_calibration(self):
+        """
+        Kalibrasyon dosyasını yükler ve şerit tespiti için gerekli parametreleri ayarlar.
+        kalibrasyon_optimize.py tarafından oluşturulan formata uygun olarak çalışır.
+        """
+        try:
+            import json
+            with open(self.calibration_file, 'r') as f:
+                calibration = json.load(f)
             
-        logging.info("Sistem durduruldu")
+            # kalibrasyon_optimize.py formatı kontrolü
+            if 'src_points' in calibration and 'dst_points' in calibration:
+                logger.info("kalibrasyon_optimize.py formatında kalibrasyon dosyası tespit edildi.")
+                
+                # Çözünürlük kontrolü
+                if 'resolution' in calibration:
+                    cal_width = calibration['resolution'].get('width', self.camera_resolution[0])
+                    cal_height = calibration['resolution'].get('height', self.camera_resolution[1])
+                    
+                    # Çözünürlük uyumsuzluğu kontrolü
+                    if cal_width != self.camera_resolution[0] or cal_height != self.camera_resolution[1]:
+                        logger.warning(f"Kalibrasyon dosyası çözünürlüğü ({cal_width}x{cal_height}) " +
+                                      f"kamera çözünürlüğü ({self.camera_resolution[0]}x{self.camera_resolution[1]}) ile uyumsuz.")
+                        logger.warning("Kalibrasyon noktaları ölçeklendirilecek.")
+                        
+                        # Ölçeklendirme faktörleri
+                        scale_x = self.camera_resolution[0] / cal_width
+                        scale_y = self.camera_resolution[1] / cal_height
+                        
+                        # Noktaları ölçeklendir
+                        src_points = calibration['src_points']
+                        for i in range(len(src_points)):
+                            src_points[i][0] *= scale_x
+                            src_points[i][1] *= scale_y
+                        
+                        dst_points = calibration['dst_points']
+                        for i in range(len(dst_points)):
+                            dst_points[i][0] *= scale_x
+                            dst_points[i][1] *= scale_y
+                    else:
+                        src_points = calibration['src_points']
+                        dst_points = calibration['dst_points']
+                else:
+                    src_points = calibration['src_points']
+                    dst_points = calibration['dst_points']
+                
+                # Şerit tespiti için ROI oluştur
+                roi_vertices = np.array([
+                    src_points[2],  # Sol alt
+                    src_points[0],  # Sol üst
+                    src_points[1],  # Sağ üst
+                    src_points[3]   # Sağ alt
+                ], dtype=np.int32)
+                
+                # Orta şerit çizgisi oluştur
+                center_line = np.array([
+                    [(src_points[2][0] + src_points[3][0]) // 2, self.camera_resolution[1]],  # Alt orta nokta
+                    [(src_points[0][0] + src_points[1][0]) // 2, (src_points[0][1] + src_points[1][1]) // 2]  # Üst orta nokta
+                ], dtype=np.int32)
+                
+                # LaneDetector'a parametreleri ayarla
+                self.lane_detector.roi_vertices = roi_vertices
+                self.lane_detector.center_line = center_line
+                
+                # Diğer parametreleri ayarla (varsayılan değerlerle)
+                self.lane_detector.canny_low = calibration.get('canny_low_threshold', 30)
+                self.lane_detector.canny_high = calibration.get('canny_high_threshold', 120)
+                self.lane_detector.blur_kernel = calibration.get('blur_kernel_size', 5)
+                self.lane_detector.min_line_length = calibration.get('min_line_length', 15)
+                self.lane_detector.max_line_gap = calibration.get('max_line_gap', 40)
+                
+                logger.info("Kalibrasyon parametreleri başarıyla yüklendi.")
+                return True
+            else:
+                # Eski format kalibrasyon dosyası, doğrudan LaneDetector'a yükle
+                logger.info("Eski format kalibrasyon dosyası tespit edildi.")
+                return self.lane_detector.load_calibration(self.calibration_file)
+                
+        except Exception as e:
+            logger.error(f"Kalibrasyon dosyası yüklenirken hata: {e}")
+            return False
 
 def parse_arguments():
-    """Komut satırı argümanlarını işler"""
-    import argparse
+    """
+    Komut satırı argümanlarını işler
+    """
+    parser = argparse.ArgumentParser(description='Otonom Araç Kontrol Programı')
+    parser.add_argument('--debug', action='store_true', help='Hata ayıklama modunu etkinleştirir')
+    parser.add_argument('--debug-fps', type=int, default=10, help='Debug modunda gösterilecek maksimum FPS')
+    parser.add_argument('--resolution', default='640x480', help='Kamera çözünürlüğü (GENxYÜK)')
+    parser.add_argument('--fps', type=int, default=30, help='Kare hızı')
     
-    parser = argparse.ArgumentParser(description="Otonom Araç Kontrol Sistemi")
-    parser.add_argument("--debug", action="store_true", help="Debug modu")
-    parser.add_argument("--width", type=int, default=320, help="Kamera genişliği")
-    parser.add_argument("--height", type=int, default=240, help="Kamera yüksekliği")
-    parser.add_argument("--fps", type=int, default=30, help="Kamera FPS")
-    parser.add_argument("--calibration", type=str, default="serit_kalibrasyon.json", help="Kalibrasyon dosya yolu")
+    # Motor pin argümanları
+    parser.add_argument('--left-motor', nargs=2, type=int, default=[16, 18], help='Sol motor pinleri (IN1 IN2)')
+    parser.add_argument('--right-motor', nargs=2, type=int, default=[36, 38], help='Sağ motor pinleri (IN1 IN2)')
+    parser.add_argument('--left-pwm', type=int, default=12, help='Sol motor Enable pini')
+    parser.add_argument('--right-pwm', type=int, default=32, help='Sağ motor Enable pini')
+    parser.add_argument('--use-bcm', action='store_true', help='BCM pin numaralandırması kullan (varsayılan: BOARD)')
+    
+    # Kalibrasyon dosyası için argüman ekle
+    parser.add_argument('--calibration', default='serit_kalibrasyon.json', help='Kalibrasyon dosyası yolu')
     
     return parser.parse_args()
 
 def main():
-    """Ana fonksiyon"""
+    """
+    Ana program
+    """
     # Argümanları işle
     args = parse_arguments()
     
-    # Otonom aracı başlat
-    vehicle = AutonomousVehicle(
-        camera_resolution=(args.width, args.height),
-        camera_framerate=args.fps,
-        calibration_file=args.calibration,
-        debug=args.debug
-    )
-    
+    # Çözünürlüğü ayrıştır
     try:
-        # CTRL+C sinyalini yakala
-        import signal
-        def signal_handler(sig, frame):
-            print("\nCtrl+C algılandı, program durduruluyor...")
-            vehicle.stop()
-            
-        signal.signal(signal.SIGINT, signal_handler)
+        width, height = map(int, args.resolution.split('x'))
+        resolution = (width, height)
+    except ValueError:
+        logger.error(f"Geçersiz çözünürlük formatı: {args.resolution}, varsayılan kullanılacak.")
+        resolution = (640, 480)
+    
+    # Otonom aracı başlat
+    try:
+        logger.info("Otonom araç başlatılıyor...")
+        otonom_arac = OtonomArac(
+            camera_resolution=resolution,
+            framerate=args.fps,
+            debug=args.debug,
+            debug_fps=args.debug_fps,
+            left_motor_pins=tuple(args.left_motor),
+            right_motor_pins=tuple(args.right_motor),
+            left_pwm_pin=args.left_pwm,
+            right_pwm_pin=args.right_pwm,
+            use_board_pins=not args.use_bcm,
+            calibration_file=args.calibration
+        )
         
-        # Sistemi başlat
-        vehicle.start()
+        # Otonom sürüşü başlat
+        otonom_arac.start()
         
+    except KeyboardInterrupt:
+        logger.info("Kullanıcı tarafından durduruldu (CTRL+C)")
     except Exception as e:
-        logging.error(f"Ana programda hata: {e}")
-        
-    finally:
-        # Program sonlandırıldığında temizlik yap
-        try:
-            vehicle.stop()
-        except:
-            pass
+        logger.error(f"Hata: {e}")
+    
+    logger.info("Program sonlandırıldı.")
 
 if __name__ == "__main__":
     main() 

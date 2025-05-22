@@ -34,12 +34,12 @@ pip install -r requirements.txt
 
 Varsayılan GPIO pin yapılandırması:
 
-self.in1_pin = 36  # Sağ motor ileri
-        self.in2_pin = 38  # Sağ motor geri
-        self.in3_pin = 16  # Sol motor ileri
-        self.in4_pin = 28  # Sol motor geri
-        self.en_a_pin = 32  # Sağ motor hız kontrolü
-        self.en_b_pin = 13  # Sol motor hız kontrolü
+- Sol Motor İleri: GPIO 17
+- Sol Motor Geri: GPIO 27
+- Sağ Motor İleri: GPIO 22
+- Sağ Motor Geri: GPIO 23
+- Sol Motor PWM: GPIO 13
+- Sağ Motor PWM: GPIO 12
 
 Bu pinleri kendi donanım yapılandırmanıza göre değiştirebilirsiniz.
 
