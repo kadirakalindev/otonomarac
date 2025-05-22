@@ -25,30 +25,30 @@ class LaneDetector:
         self.height = camera_resolution[1]
         self.debug = debug
         
-        # ROI parametreleri - genişletildi ve doğrulama eklendi
+        # ROI parametreleri - Daha dar ve simetrik bölge
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Geçersiz çözünürlük değerleri")
             
         self.roi_vertices = np.array([
-            [0, self.height],
-            [self.width * 0.3, self.height * 0.5],  # Daha yukarı ve geniş
-            [self.width * 0.7, self.height * 0.5],  # Daha yukarı ve geniş
-            [self.width, self.height]
+            [self.width * 0.2, self.height],             # Sol alt
+            [self.width * 0.45, self.height * 0.55],     # Sol üst (daha merkezi)
+            [self.width * 0.55, self.height * 0.55],     # Sağ üst (daha merkezi) 
+            [self.width * 0.8, self.height]              # Sağ alt
         ], dtype=np.int32)
         
-        # Temel filtre parametreleri - hassasiyet artırıldı
+        # Temel filtre parametreleri - hassasiyet azaltıldı
         self.blur_kernel = 5
         if self.blur_kernel % 2 == 0:  # Blur kernel tek sayı olmalı
             self.blur_kernel += 1
             
-        self.canny_low = 30    # Düşürüldü
-        self.canny_high = 120  # Düşürüldü
+        self.canny_low = 50     # Yükseltildi
+        self.canny_high = 150   # Yükseltildi
         
-        # Hough parametreleri - hassasiyet artırıldı ve sınırlar eklendi
-        self.rho = max(1, min(2, self.width / 320))  # Çözünürlüğe göre ayarla
+        # Hough parametreleri - daha seçici
+        self.rho = 2  # Hassasiyeti azalt (piksel çözünürlüğü)
         self.theta = np.pi/180
-        self.min_line_length = max(15, self.height * 0.1)  # Görüntü boyutuna göre ayarla
-        self.max_line_gap = min(40, self.height * 0.2)     # Görüntü boyutuna göre ayarla
+        self.min_line_length = self.height * 0.15  # Daha uzun çizgiler ara
+        self.max_line_gap = self.height * 0.1      # Çizgi aralığını azalt
         
         # Şerit hafızası ve yumuşatma - geliştirildi
         self.last_left_fit = None
@@ -145,9 +145,10 @@ class LaneDetector:
         return masked
     
     def detect_lane_lines(self, edges):
-        """Basitleştirilmiş şerit tespiti"""
+        """Basitleştirilmiş şerit tespiti - geliştirilmiş versiyon"""
+        # Hough çizgi tespit parametreleri güncellendi
         lines = cv2.HoughLinesP(
-            edges, self.rho, self.theta, 20,
+            edges, self.rho, self.theta, 30,  # Eşik değeri yükseltildi
             minLineLength=self.min_line_length,
             maxLineGap=self.max_line_gap
         )
@@ -156,22 +157,57 @@ class LaneDetector:
         right_lines = []
         
         if lines is not None:
+            # Çizgileri filtrele
+            valid_lines = []
             for line in lines:
                 x1, y1, x2, y2 = line[0]
-                if x2 - x1 == 0:
+                
+                # Çok kısa çizgileri filtrele
+                if np.sqrt((x2-x1)**2 + (y2-y1)**2) < self.min_line_length:
+                    continue
+                    
+                # Eğim hesapla (sonsuz eğimi önle)
+                if x2 - x1 == 0:  
                     continue
                     
                 slope = (y2 - y1) / (x2 - x1)
                 
-                # Yatay çizgileri filtrele
-                if abs(slope) < 0.3:
+                # Yatay çizgileri daha agresif filtrele
+                if abs(slope) < 0.35:
                     continue
                 
-                # Sol ve sağ şeritleri ayır
-                if slope < 0 and x1 < self.width * 0.6:
-                    left_lines.append((x1, y1, x2, y2, slope))
-                elif slope > 0 and x1 > self.width * 0.4:
-                    right_lines.append((x1, y1, x2, y2, slope))
+                # Aşırı dik çizgileri filtrele
+                if abs(slope) > 5:
+                    continue
+                
+                # Çizginin orta noktasını hesapla
+                mid_x = (x1 + x2) / 2
+                
+                # Görüntünün alt yarısında olmayan çizgileri filtrele
+                if (y1 + y2) / 2 < self.height * 0.6:
+                    continue
+                
+                # Geçerli çizgileri ekle
+                valid_lines.append((x1, y1, x2, y2, slope, mid_x))
+            
+            # Eğer yeterli çizgi kaldıysa, sıralama ve gruplama yap
+            if valid_lines:
+                # Eğime göre çizgileri ayır
+                for x1, y1, x2, y2, slope, mid_x in valid_lines:
+                    # Sol şerit çizgileri (negatif eğim)
+                    if slope < 0 and mid_x < self.width * 0.6:
+                        left_lines.append((x1, y1, x2, y2, slope))
+                    
+                    # Sağ şerit çizgileri (pozitif eğim)
+                    elif slope > 0 and mid_x > self.width * 0.4:
+                        right_lines.append((x1, y1, x2, y2, slope))
+            
+        # Şerit doğrulama: Minimum sayıda çizgi kontrolü
+        if len(left_lines) < 1:
+            left_lines = []
+            
+        if len(right_lines) < 1:
+            right_lines = []
         
         return left_lines, right_lines
     
@@ -222,26 +258,48 @@ class LaneDetector:
         return fit
     
     def draw_lanes(self, image, left_fit, right_fit):
-        """Şeritleri çiz"""
+        """Şeritleri çiz ve şerit bölgesini doldur"""
         overlay = np.zeros_like(image)
         
-        if left_fit is not None or right_fit is not None:
+        # Şeritleri çizebilmek için her iki şeride de ihtiyaç var
+        if left_fit is not None and right_fit is not None:
             ploty = np.linspace(self.height * 0.6, self.height, 20)
             
-            if left_fit is not None:
-                left_fitx = left_fit[0] * ploty + left_fit[1]
-                pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-                cv2.polylines(overlay, np.int32([pts_left]), False, (0, 255, 0), 8)
+            # Sol şerit
+            left_fitx = left_fit[0] * ploty + left_fit[1]
+            pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+            cv2.polylines(overlay, np.int32([pts_left]), False, (0, 255, 0), 8)
             
-            if right_fit is not None:
-                right_fitx = right_fit[0] * ploty + right_fit[1]
-                pts_right = np.array([np.transpose(np.vstack([right_fitx, ploty]))])
-                cv2.polylines(overlay, np.int32([pts_right]), False, (0, 255, 0), 8)
+            # Sağ şerit
+            right_fitx = right_fit[0] * ploty + right_fit[1]
+            pts_right = np.array([np.transpose(np.vstack([right_fitx, ploty]))])
+            cv2.polylines(overlay, np.int32([pts_right]), False, (0, 255, 0), 8)
             
             # Şeritler arası alanı doldur
-            if left_fit is not None and right_fit is not None:
-                pts = np.hstack((pts_left, np.fliplr(pts_right)))
-                cv2.fillPoly(overlay, np.int32([pts]), (0, 100, 0))
+            pts = np.hstack((pts_left, np.fliplr(pts_right)))
+            cv2.fillPoly(overlay, np.int32([pts]), (0, 100, 0))
+            
+            # Şerit genişliğini kontrol et - çok geniş veya dar şeritler için uyarı
+            bottom_width = abs(right_fitx[-1] - left_fitx[-1])
+            expected_width = self.width * 0.4  # Beklenen şerit genişliği
+            
+            if bottom_width < expected_width * 0.5 or bottom_width > expected_width * 1.5:
+                if self.debug:
+                    cv2.putText(overlay, "Gecersiz Serit Genisligi", (10, 130), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        
+        # Sadece tek şerit algılandıysa
+        elif left_fit is not None:
+            ploty = np.linspace(self.height * 0.6, self.height, 20)
+            left_fitx = left_fit[0] * ploty + left_fit[1]
+            pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+            cv2.polylines(overlay, np.int32([pts_left]), False, (0, 255, 0), 8)
+            
+        elif right_fit is not None:
+            ploty = np.linspace(self.height * 0.6, self.height, 20)
+            right_fitx = right_fit[0] * ploty + right_fit[1]
+            pts_right = np.array([np.transpose(np.vstack([right_fitx, ploty]))])
+            cv2.polylines(overlay, np.int32([pts_right]), False, (0, 255, 0), 8)
         
         return cv2.addWeighted(image, 1, overlay, 0.5, 0)
     

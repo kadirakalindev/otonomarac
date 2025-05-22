@@ -555,6 +555,57 @@ class MotorController:
         
         logger.debug("Araç durduruldu.")
     
+    def calculate_center_diff(self, left_fit, right_fit):
+        """
+        Merkez sapmasını hesapla - daha güvenli versiyon
+        """
+        if left_fit is None and right_fit is None:
+            return None
+            
+        # Alt noktadaki şerit pozisyonları
+        y = self.height
+        
+        # İki şerit de varsa normal hesaplama
+        if left_fit is not None and right_fit is not None:
+            left_x = left_fit[0] * y + left_fit[1]
+            right_x = right_fit[0] * y + right_fit[1]
+            
+            # Şerit genişliği kontrol - çok geniş veya çok dar şeritler için uyarı
+            lane_width = right_x - left_x
+            expected_width = self.width * 0.4  # Beklenen şerit genişliği
+            
+            # Şerit genişliği mantıklı değilse, daha önce iyi bilinen genişliği kullan
+            if lane_width < expected_width * 0.5 or lane_width > expected_width * 1.5:
+                if self._should_log():
+                    logger.warning(f"Şüpheli şerit genişliği tespit edildi: {lane_width:.1f}px")
+                
+                # Sola veya sağa çok fazla kayma yoksa daha muhafazakar bir yaklaşım kullan
+                if abs(self.previous_error) < 30:
+                    return self.previous_error * 0.8  # Önceki sapmayı hafifçe azaltarak kullan
+                
+            lane_center = (left_x + right_x) / 2
+            
+        # Sadece sol şerit algılandıysa
+        elif left_fit is not None:
+            left_x = left_fit[0] * y + left_fit[1]
+            # Şerit tahmini - daha muhafazakar (arabayı sağa daha az kaydır)
+            lane_center = left_x + self.width * 0.2
+            if self._should_log():
+                logger.info("Sadece sol şerit algılandı, sağ şerit tahmin ediliyor")
+            
+        # Sadece sağ şerit algılandıysa  
+        else:  # right_fit is not None
+            right_x = right_fit[0] * y + right_fit[1]
+            # Şerit tahmini - daha muhafazakar (arabayı sola daha az kaydır)
+            lane_center = right_x - self.width * 0.2
+            if self._should_log():
+                logger.info("Sadece sağ şerit algılandı, sol şerit tahmin ediliyor")
+        
+        image_center = self.width / 2
+        center_diff = lane_center - image_center
+        
+        return center_diff
+        
     def follow_lane(self, center_diff, speed=None):
         """
         Şerit takibi için araç kontrolü - PID ile geliştirilmiş versiyon
@@ -571,8 +622,9 @@ class MotorController:
                     logger.warning(f"Şerit kaybedildi ({self.lost_lane_counter}), kurtarma modu aktif...")
                 
                 # Şerit kaybedildiğinde son bilinen yöne devam et
-                recovery_speed = self.default_speed * 0.8  # Kurtarma modunda daha düşük hız
+                recovery_speed = self.default_speed * 0.75  # Kurtarma modunda daha düşük hız
                 
+                # Önceki hatanın büyüklüğüne göre farklı stratejiler uygula
                 if self.previous_error > 20:  # Önemli sağa sapma
                     # Son bilinen sapma sağa ise, sola dön (daha agresif)
                     left_speed = self.min_motor_speed * 0.7
@@ -585,13 +637,13 @@ class MotorController:
                     logger.debug("Kurtarma: Sağa dönüş (agresif)")
                 elif self.previous_error > 5:  # Hafif sağa sapma
                     # Hafif sola dön
-                    left_speed = self.min_motor_speed
+                    left_speed = self.min_motor_speed * 0.9
                     right_speed = recovery_speed
                     logger.debug("Kurtarma: Sola dönüş (hafif)")
                 elif self.previous_error < -5:  # Hafif sola sapma
                     # Hafif sağa dön
                     left_speed = recovery_speed
-                    right_speed = self.min_motor_speed
+                    right_speed = self.min_motor_speed * 0.9
                     logger.debug("Kurtarma: Sağa dönüş (hafif)")
                 else:
                     # Sapma yoksa, zigzag arama modeli uygula
@@ -612,7 +664,7 @@ class MotorController:
                 
                 # Uzun süre şerit bulunamazsa hızı kademeli olarak azalt
                 if self.lost_lane_counter > 50:
-                    slowdown_factor = max(0.4, 1.0 - (self.lost_lane_counter - 50) / 100)
+                    slowdown_factor = max(0.5, 1.0 - (self.lost_lane_counter - 50) / 200)
                     left_speed *= slowdown_factor
                     right_speed *= slowdown_factor
                     
@@ -639,9 +691,9 @@ class MotorController:
         # Virajlarda daha agresif dönüş için sapma miktarına göre ek düzeltme faktörü
         extra_correction = 0
         if abs(center_diff) > 50:  # Büyük sapmalar için
-            extra_correction = 0.15
+            extra_correction = 0.2
         elif abs(center_diff) > 30:  # Orta sapmalar için
-            extra_correction = 0.1
+            extra_correction = 0.15
         
         # PID düzeltmesini uygula
         if abs(center_diff) < self.center_deadzone:
@@ -652,12 +704,15 @@ class MotorController:
             # PID düzeltmesini hızlara uygula
             correction = (pid_correction * self.turn_speed_factor) + extra_correction
             
+            # Güvenlik için correction değerini sınırla
+            correction = max(-0.8, min(0.8, correction))
+            
             if center_diff < 0:  # Sola dönüş gerekiyor
                 left_speed = base_speed * (1 - abs(correction) * 1.2)  # Sol motor daha yavaş
-                right_speed = base_speed * (1 + abs(correction))       # Sağ motor daha hızlı
+                right_speed = base_speed * (1 + abs(correction) * 0.9)  # Sağ motor daha hızlı
             else:  # Sağa dönüş gerekiyor
-                left_speed = base_speed * (1 + abs(correction))        # Sol motor daha hızlı
-                right_speed = base_speed * (1 - abs(correction) * 1.2) # Sağ motor daha yavaş
+                left_speed = base_speed * (1 + abs(correction) * 0.9)  # Sol motor daha hızlı
+                right_speed = base_speed * (1 - abs(correction) * 1.2)  # Sağ motor daha yavaş
         
         # Hızları sınırla
         left_speed = max(min(left_speed, self.max_speed), self.min_motor_speed)
