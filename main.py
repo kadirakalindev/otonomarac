@@ -127,69 +127,41 @@ class OtonomArac:
             )
             self.camera.configure(preview_config)
             
-            # Kamera özel ayarlarını düzenleme - ışık koşullarına göre optimize edildi
+            # Kamera özel ayarlarını düzenleme
             try:
                 controls = {
-                    "AwbEnable": True,             # Otomatik beyaz dengesi
-                    "AeEnable": True,              # Otomatik pozlama
-                    "ExposureTime": 20000,         # Pozlama süresi artırıldı (mikrosaniye)
-                    "AnalogueGain": 2.0,           # Analog kazanç artırıldı - daha fazla ışık
-                    "Brightness": 0.15,            # Parlaklık artırıldı
-                    "Contrast": 1.3,               # Kontrast artırıldı - şeritlerin daha belirgin olması için
-                    "Sharpness": 1.2,              # Keskinlik
-                    "Saturation": 1.3,             # Renk doygunluğu artırıldı - şeritlerin daha belirgin olması için
-                    "NoiseReductionMode": 2,        # Gürültü azaltma seviyesi artırıldı
-                    "AwbRedGain": 1.5,             # Kırmızı renk dengesi artırıldı - daha sıcak görüntü
-                    "AwbBlueGain": 1.3             # Mavi renk dengesi
+                    "AwbEnable": True,          # Otomatik beyaz dengesi
+                    "AeEnable": True,           # Otomatik pozlama
+                    "ExposureTime": 10000,      # Pozlama süresi (mikrosaniye)
+                    "AnalogueGain": 1.0,        # Analog kazanç
+                    "Brightness": 0.0,          # Parlaklık
+                    "Contrast": 1.0,            # Kontrast
+                    "Sharpness": 1.0,           # Keskinlik
+                    "NoiseReductionMode": 1     # Gürültü azaltma
                 }
                 self.camera.set_controls(controls)
-                logger.info("Kamera kontrolleri ayarlandı - ışık koşullarına göre optimize edildi")
+                logger.info("Kamera kontrolleri ayarlandı")
             except Exception as e:
                 logger.warning(f"Kamera kontrolleri ayarlanırken hata: {e}")
-                logger.warning("Varsayılan kamera ayarları kullanılacak")
             
             # Kamerayı başlat
             self.camera.start()
             
             # Test görüntüsü al
             logger.info("Kamera test ediliyor...")
-            for _ in range(5):  # 5 kere dene - daha fazla deneme
+            for _ in range(3):  # 3 kere dene
                 try:
                     test_frame = self.camera.capture_array()
                     if test_frame is not None and test_frame.size > 0:
                         logger.info(f"Kamera test başarılı. Görüntü boyutu: {test_frame.shape}")
-                        
-                        # Görüntü parlaklığını kontrol et
-                        if len(test_frame.shape) == 3 and test_frame.shape[2] == 3:
-                            # RGB'den gri tonlamaya çevir
-                            gray = cv2.cvtColor(test_frame, cv2.COLOR_RGB2GRAY)
-                            mean_brightness = np.mean(gray)
-                            logger.info(f"Görüntü ortalama parlaklığı: {mean_brightness:.1f}")
-                            
-                            # Parlaklık çok düşükse uyarı ver
-                            if mean_brightness < 80:
-                                logger.warning(f"Görüntü parlaklığı düşük: {mean_brightness:.1f} < 80")
-                                logger.warning("Kamera pozlaması ve parlaklık ayarlarını kontrol edin")
-                                
-                                # Parlaklığı artırmayı dene
-                                try:
-                                    current_controls = self.camera.controls
-                                    current_controls["ExposureTime"] = min(40000, current_controls.get("ExposureTime", 20000) * 1.5)
-                                    current_controls["AnalogueGain"] = min(4.0, current_controls.get("AnalogueGain", 2.0) * 1.25)
-                                    current_controls["Brightness"] = min(0.3, current_controls.get("Brightness", 0.15) * 1.5)
-                                    self.camera.set_controls(current_controls)
-                                    logger.info("Otomatik parlaklık düzeltmesi uygulandı")
-                                except:
-                                    pass
-                        
                         break
                 except Exception as e:
                     logger.warning(f"Test görüntüsü alınamadı, tekrar deneniyor: {e}")
                 time.sleep(0.5)
             
-            # Kameranın dengelenmesi için bekle - süre artırıldı
+            # Kameranın dengelenmesi için bekle
             logger.info("Kamera dengeleniyor...")
-            time.sleep(4)  # Daha uzun süre bekleyerek kameranın dengelenmesini sağla
+            time.sleep(2)
             
             logger.info("Kamera başarıyla başlatıldı.")
             
