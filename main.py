@@ -39,7 +39,9 @@ class OtonomArac:
                  left_pwm_pin=12,             # Sol motor Enable pini
                  right_pwm_pin=32,            # Sağ motor Enable pini
                  use_board_pins=True,         # BOARD pin numaralandırması kullan
-                 calibration_file="serit_kalibrasyon.json"):  # Kalibrasyon dosyası yolu
+                 calibration_file="serit_kalibrasyon.json",  # Kalibrasyon dosyası yolu
+                 camera_type="picamera2",     # Kamera tipi: 'picamera2', 'picamera', 'opencv'
+                 camera_index=0):             # Kamera indeksi (OpenCV için)
         """
         OtonomArac sınıfını başlatır.
         
@@ -54,6 +56,8 @@ class OtonomArac:
             right_pwm_pin (int): Sağ motor Enable pini
             use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
             calibration_file (str): Kalibrasyon dosyası yolu
+            camera_type (str): Kullanılacak kamera tipi ('picamera2', 'picamera', 'opencv')
+            camera_index (int): Kamera indeksi (OpenCV için)
         """
         self.debug = debug
         self.debug_fps = debug_fps
@@ -62,6 +66,8 @@ class OtonomArac:
         self.framerate = framerate
         self.camera = None  # Başlangıçta None olarak tanımla
         self.calibration_file = calibration_file  # Kalibrasyon dosyası yolunu sakla
+        self.camera_type = camera_type  # Kamera tipini sakla
+        self.camera_index = camera_index  # Kamera indeksini sakla
         
         # Modülleri başlatma denemesi - hata durumunda güvenli kapatma
         try:
@@ -469,6 +475,12 @@ def parse_arguments():
     # Kalibrasyon dosyası için argüman ekle
     parser.add_argument('--calibration', default='serit_kalibrasyon.json', help='Kalibrasyon dosyası yolu')
     
+    # Kamera tipi ve indeks argümanları
+    parser.add_argument('--camera-type', choices=['picamera2', 'picamera', 'opencv'], default='picamera2',
+                      help='Kullanılacak kamera tipi (varsayılan: picamera2)')
+    parser.add_argument('--camera-index', type=int, default=0, 
+                      help='Kamera indeksi (OpenCV için, varsayılan: 0)')
+    
     return parser.parse_args()
 
 def main():
@@ -499,7 +511,9 @@ def main():
             left_pwm_pin=args.left_pwm,
             right_pwm_pin=args.right_pwm,
             use_board_pins=not args.use_bcm,
-            calibration_file=args.calibration
+            calibration_file=args.calibration,
+            camera_type=args.camera_type,
+            camera_index=args.camera_index
         )
         
         # Otonom sürüşü başlat
