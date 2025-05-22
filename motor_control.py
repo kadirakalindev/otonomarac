@@ -34,11 +34,11 @@ class MotorController:
     """
     def __init__(self, debug=False):
         # GPIO pinlerinin konfigurasyonu
-        self.in1_pin = 22  # Sağ motor ileri
-        self.in2_pin = 23  # Sağ motor geri
-        self.in3_pin = 17  # Sol motor ileri
-        self.in4_pin = 27  # Sol motor geri
-        self.en_a_pin = 12  # Sağ motor hız kontrolü
+        self.in1_pin = 36  # Sağ motor ileri
+        self.in2_pin = 38  # Sağ motor geri
+        self.in3_pin = 16  # Sol motor ileri
+        self.in4_pin = 28  # Sol motor geri
+        self.en_a_pin = 32  # Sağ motor hız kontrolü
         self.en_b_pin = 13  # Sol motor hız kontrolü
         
         # Hız ve dönüş parametreleri
