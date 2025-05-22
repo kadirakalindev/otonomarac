@@ -38,7 +38,8 @@ class OtonomArac:
                  left_pwm_pin=12,             # Sol motor Enable pini
                  right_pwm_pin=32,            # Sağ motor Enable pini
                  use_board_pins=True,         # BOARD pin numaralandırması kullan
-                 calibration_file="calibration.json"):  # Kalibrasyon dosyası yolu
+                 calibration_file="calibration.json",
+                 use_picamera=True):          # Picamera kullan (False: USB kamera)
         """
         OtonomArac sınıfını başlatır.
         
@@ -53,6 +54,7 @@ class OtonomArac:
             right_pwm_pin (int): Sağ motor Enable pini
             use_board_pins (bool): BOARD pin numaralandırması kullan (True) veya BCM kullan (False)
             calibration_file (str): Kalibrasyon dosyası yolu
+            use_picamera (bool): Picamera kullan (True) veya USB kamera kullan (False)
         """
         self.debug = debug
         self.debug_fps = debug_fps
@@ -61,6 +63,9 @@ class OtonomArac:
         self.framerate = framerate
         self.camera = None  # Başlangıçta None olarak tanımla
         self.calibration_file = calibration_file  # Kalibrasyon dosyası yolunu sakla
+        self.use_picamera = use_picamera  # Picamera mı yoksa USB kamera mı kullanılacak
+        self.stop_requested = False  # durdurma isteği
+        self.resolution = camera_resolution  # Çözünürlük için alternatif değişken
         
         # Modülleri başlatma denemesi - hata durumunda güvenli kapatma
         try:
@@ -111,50 +116,135 @@ class OtonomArac:
     
     def _initialize_camera(self):
         """
-        Kamerayı başlat ve gerekli ayarları yap
+        Kamerayı başlatır ve gerekli ayarları yapar (Picamera2 veya USB kamera)
         """
         try:
-            logger.info("Kamera başlatılıyor...")
+            logger.info(f"Kamera başlatılıyor... (Picamera: {self.use_picamera})")
+            
+            # Eğer önceki kamera nesnesi varsa temizle
             if self.camera is not None:
-                self.camera.release()
+                if self.use_picamera:
+                    try:
+                        self.camera.stop()
+                        self.camera.close()
+                    except:
+                        pass
+                else:
+                    try:
+                        self.camera.release()
+                    except:
+                        pass
+                    
                 self.camera = None
                 logger.debug("Önceki kamera kaynağı kapatıldı")
-                
-            self.camera = cv2.VideoCapture(0)  # Varsayılan kamera
-            
-            # Kamera başarıyla açıldı mı kontrol et
-            if not self.camera.isOpened():
-                logger.error("Kamera açılamadı!")
-                return False
-                
-            # Kamera çözünürlüğünü ayarla
-            if self.camera_resolution:
-                width, height = self.camera_resolution
-                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-                logger.debug(f"Kamera çözünürlüğü {width}x{height} olarak ayarlandı")
-                
-            # Kamera ayarlarını optimize et
-            self.camera.set(cv2.CAP_PROP_EXPOSURE, 15000)  # Pozlama süresini azalt (daha iyi kontrast)
-            self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 150)  # Parlaklık ayarı
-            self.camera.set(cv2.CAP_PROP_CONTRAST, 130)   # Kontrast ayarı
-            self.camera.set(cv2.CAP_PROP_SATURATION, 130) # Doygunluk ayarı
-            self.camera.set(cv2.CAP_PROP_SHARPNESS, 2.5)  # Keskinlik ayarı
-            
-            # Kamera stabilizasyonu için bekle
-            time.sleep(2.0)  
-            
-            # Test çekimi yap
-            logger.debug("Kamera test görüntüsü alınıyor...")
-            ret, frame = self.camera.read()
-            if not ret or frame is None:
-                logger.error("Kameradan test görüntüsü alınamadı!")
-                return False
-                
-            actual_height, actual_width = frame.shape[:2]
-            logger.debug(f"Kamera açıldı. Gerçek çözünürlük: {actual_width}x{actual_height}")
-            
+
+            # Kamerayı seçilen tipine göre başlat
+            if self.use_picamera:
+                try:
+                    # Picamera2 için
+                    from picamera2 import Picamera2
+                    
+                    # Picamera2 nesnesini oluştur
+                    self.camera = Picamera2()
+                    
+                    # Kamera yapılandırması
+                    preview_config = self.camera.create_preview_configuration(
+                        main={"size": self.camera_resolution, "format": "RGB888"},
+                        lores={"size": (320, 240), "format": "YUV420"},
+                        display="lores",
+                        buffer_count=4  # Buffer sayısını artır
+                    )
+                    self.camera.configure(preview_config)
+                    
+                    # Kamera özel ayarlarını düzenleme
+                    try:
+                        controls = {
+                            "AwbEnable": True,          # Otomatik beyaz dengesi
+                            "AeEnable": True,           # Otomatik pozlama
+                            "ExposureTime": 15000,      # Pozlama süresi (mikrosaniye)
+                            "AnalogueGain": 1.0,        # Analog kazanç
+                            "Brightness": 0.0,          # Parlaklık
+                            "Contrast": 1.0,            # Kontrast
+                            "Sharpness": 2.5,           # Keskinlik
+                            "NoiseReductionMode": 1     # Gürültü azaltma
+                        }
+                        self.camera.set_controls(controls)
+                        logger.info("Kamera kontrolleri ayarlandı")
+                    except Exception as e:
+                        logger.warning(f"Kamera kontrolleri ayarlanırken hata: {e}")
+                    
+                    # Kamerayı başlat
+                    self.camera.start()
+                    
+                    # Kamera dengelenmesi için bekle
+                    logger.info("Kamera dengeleniyor...")
+                    time.sleep(2)
+                    
+                    # Test görüntüsü al
+                    logger.debug("Kamera test görüntüsü alınıyor...")
+                    test_frame = self.camera.capture_array()
+                    
+                    if test_frame is None or test_frame.size == 0:
+                        logger.error("Kameradan geçersiz görüntü alındı!")
+                        return False
+                        
+                    logger.info(f"Kamera başarıyla başlatıldı. Görüntü boyutu: {test_frame.shape}")
+                    
+                except ImportError:
+                    logger.error("Picamera2 kütüphanesi bulunamadı! USB kamera moduna geçiliyor.")
+                    self.use_picamera = False
+                    return self._initialize_camera()  # USB kamera ile tekrar dene
+                    
+                except Exception as e:
+                    logger.error(f"Picamera başlatma hatası: {e}")
+                    self.use_picamera = False
+                    logger.warning("USB kamera moduna geçiliyor...")
+                    return self._initialize_camera()  # USB kamera ile tekrar dene
+            else:
+                # OpenCV VideoCapture için
+                try:
+                    # USB kamera başlat
+                    self.camera = cv2.VideoCapture(0)
+                    
+                    # Kamera başarıyla açıldı mı kontrol et
+                    if not self.camera.isOpened():
+                        logger.error("USB kamera açılamadı!")
+                        return False
+                    
+                    # Kamera çözünürlüğünü ayarla
+                    width, height = self.camera_resolution
+                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                    
+                    # Kamera parametrelerini ayarla (bazı kameralar bu parametreleri desteklemeyebilir)
+                    try:
+                        self.camera.set(cv2.CAP_PROP_EXPOSURE, 15000)  # Pozlama
+                        self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 150)  # Parlaklık
+                        self.camera.set(cv2.CAP_PROP_CONTRAST, 130)    # Kontrast
+                        self.camera.set(cv2.CAP_PROP_SATURATION, 130)  # Doygunluk
+                        self.camera.set(cv2.CAP_PROP_SHARPNESS, 2.5)   # Keskinlik
+                        logger.debug("Kamera parametreleri ayarlandı")
+                    except:
+                        logger.warning("Bazı kamera parametreleri ayarlanamadı - bu normal olabilir")
+                    
+                    # Kamera dengelenmesi için bekle
+                    time.sleep(2)
+                    
+                    # Test görüntüsü al
+                    ret, frame = self.camera.read()
+                    
+                    if not ret or frame is None:
+                        logger.error("USB kameradan test görüntüsü alınamadı!")
+                        return False
+                    
+                    logger.info(f"USB kamera başarıyla başlatıldı. Görüntü boyutu: {frame.shape}")
+                    
+                except Exception as e:
+                    logger.error(f"USB kamera başlatma hatası: {e}")
+                    return False
+                    
             return True
+            
         except Exception as e:
             logger.error(f"Kamera başlatma hatası: {str(e)}")
             return False
@@ -167,6 +257,45 @@ class OtonomArac:
         self.cleanup()
         sys.exit(0)
     
+    def _display_debug_info(self, processed_frame, lane_info, center_diff):
+        """
+        Debug bilgilerini ekranda gösterir
+        """
+        if processed_frame is None:
+            return
+            
+        # Şerit bilgilerini çiz
+        left_lane, right_lane = lane_info
+        if left_lane is not None:
+            cv2.line(processed_frame, (left_lane[0], left_lane[1]), (left_lane[2], left_lane[3]), (0, 255, 0), 2)
+            
+        if right_lane is not None:
+            cv2.line(processed_frame, (right_lane[0], right_lane[1]), (right_lane[2], right_lane[3]), (0, 255, 0), 2)
+            
+        # Merkez sapmasını göster
+        if center_diff is not None:
+            cv2.putText(processed_frame, f"Merkez Farkı: {center_diff:.1f}px", 
+                      (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                      
+        # Görüntüyü göster
+        cv2.imshow("Otonom Araç", processed_frame)
+        key = cv2.waitKey(1) & 0xFF
+        
+        # Tuş kontrolleri
+        if key == 27:  # ESC tuşu
+            logger.info("Kullanıcı tarafından durduruldu (ESC)")
+            self.stop_requested = True
+            
+    def _restart_program(self):
+        """
+        Programı yeniden başlat
+        """
+        logger.warning("Program yeniden başlatılıyor...")
+        self._cleanup()
+        # Python programını yeniden başlat
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
+        
     def start(self):
         """
         Araç kontrol döngüsünü başlat
@@ -177,10 +306,11 @@ class OtonomArac:
         consecutive_errors = 0
         max_consecutive_errors = 5
         
-        while not self.running:
+        # Ana kontrol döngüsü
+        while not self.stop_requested:
             try:
                 # Kamera kontrolü ve başlatma
-                if self.camera is None or not self.camera.isOpened():
+                if self.camera is None or (not self.use_picamera and not self.camera.isOpened()):
                     logger.warning("Kamera bağlantısı yok, yeniden başlatılıyor...")
                     if not self._initialize_camera():
                         logger.error("Kamera başlatılamadı, 3 saniye bekleniyor...")
@@ -188,18 +318,31 @@ class OtonomArac:
                         consecutive_errors += 1
                         if consecutive_errors >= max_consecutive_errors:
                             logger.error(f"{max_consecutive_errors} ardışık hata! Program yeniden başlatılıyor.")
-                            self.cleanup()
+                            self._restart_program()
                         continue
                 
                 # Görüntü yakala
-                ret, frame = self.camera.read()
-                if not ret or frame is None:
+                frame = None
+                if self.use_picamera:
+                    try:
+                        frame = self.camera.capture_array()
+                        # RGB'den BGR'ye dönüştür (OpenCV için)
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    except Exception as e:
+                        logger.error(f"Picamera görüntü yakalama hatası: {e}")
+                        frame = None
+                else:
+                    ret, frame = self.camera.read()
+                    if not ret:
+                        frame = None
+                
+                if frame is None:
                     logger.error("Kameradan görüntü alınamadı!")
                     self.motor_controller.stop()
                     consecutive_errors += 1
                     if consecutive_errors >= max_consecutive_errors:
                         logger.error(f"{max_consecutive_errors} ardışık hata! Program yeniden başlatılıyor.")
-                        self.cleanup()
+                        self._restart_program()
                     continue
                 
                 # Görüntü işleme
@@ -211,7 +354,7 @@ class OtonomArac:
                 # Motor kontrolü
                 if center_diff is not None:
                     self.motor_controller.follow_lane(center_diff, self.motor_controller.default_speed)
-                    consecutive_errors = 0  # Başarılı işlem, hata sayacını sıfırla
+                    consecutive_errors = max(0, consecutive_errors - 1)  # Başarılı işlem, hata sayacını azalt
                 else:
                     # Şerit bulunamadı
                     if self.lane_detector.detection_failures > self.lane_detector.max_detection_failures:
@@ -224,21 +367,22 @@ class OtonomArac:
                     self._display_debug_info(processed_frame, lane_info, center_diff)
                 
                 # İşlem başına bekleme süresi
-                time.sleep(0.05)  # 50ms bekleme (20 FPS hedefi)
+                time.sleep(0.02)  # 20ms bekleme (50 FPS hedefi)
                 
             except KeyboardInterrupt:
                 logger.info("Klavye kesintisi, program durduruluyor...")
                 break
             except Exception as e:
                 logger.error(f"İşlem hatası: {str(e)}")
+                import traceback
                 logger.debug(traceback.format_exc())
                 consecutive_errors += 1
                 if consecutive_errors >= max_consecutive_errors:
                     logger.error(f"{max_consecutive_errors} ardışık hata! Program yeniden başlatılıyor.")
-                    self.cleanup()
+                    self._restart_program()
         
         # Kaynakları temizle
-        self.cleanup()
+        self._cleanup()
         logger.info("Program sonlandırıldı.")
     
     def stop(self):
@@ -262,15 +406,25 @@ class OtonomArac:
         # Kamerayı kapat
         if hasattr(self, 'camera') and self.camera is not None:
             try:
-                self.camera.release()
-            except:
-                pass
+                if self.use_picamera:
+                    self.camera.stop()
+                    self.camera.close()
+                else:
+                    self.camera.release()
+            except Exception as e:
+                logger.error(f"Kamera kapatma hatası: {e}")
         
         # OpenCV pencerelerini kapat
         if self.debug:
             cv2.destroyAllWindows()
         
         logger.info("Temizleme tamamlandı.")
+        
+    def _cleanup(self):
+        """
+        Kaynakları temizle (alias)
+        """
+        self.cleanup()
 
     def _calculate_center_diff(self, lane_info):
         """
@@ -350,6 +504,9 @@ def parse_arguments():
     # Kalibrasyon dosyası için argüman ekle
     parser.add_argument('--calibration', default='calibration.json', help='Kalibrasyon dosyası yolu')
     
+    # Kamera tipi seçimi için argüman ekle
+    parser.add_argument('--usb-camera', action='store_true', help='USB kamera kullan (varsayılan: Picamera)')
+    
     return parser.parse_args()
 
 def main():
@@ -380,7 +537,8 @@ def main():
             left_pwm_pin=args.left_pwm,
             right_pwm_pin=args.right_pwm,
             use_board_pins=not args.use_bcm,
-            calibration_file=args.calibration
+            calibration_file=args.calibration,
+            use_picamera=not args.usb_camera  # USB kamera parametresi ekle
         )
         
         # Otonom sürüşü başlat
