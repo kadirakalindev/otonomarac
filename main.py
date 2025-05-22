@@ -134,7 +134,7 @@ class OtonomArac:
                     "AeEnable": True,           # Otomatik pozlama
                     "ExposureTime": 10000,      # Pozlama süresi (mikrosaniye)
                     "AnalogueGain": 1.0,        # Analog kazanç
-                    "Brightness": 0.0,          # Parlaklık
+                    "Brightness": 0.3,          # Parlaklık
                     "Contrast": 1.0,            # Kontrast
                     "Sharpness": 1.0,           # Keskinlik
                     "NoiseReductionMode": 1     # Gürültü azaltma
