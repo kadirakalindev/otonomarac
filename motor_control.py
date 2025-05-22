@@ -148,9 +148,9 @@ class MotorController:
             self.cleanup()
             raise
         
-        # Başlangıç motor faktörleri - dengeli başlangıç
-        self.left_motor_factor = 0.95
-        self.right_motor_factor = 0.95
+        # Başlangıç motor faktörleri - Sol motor faktörü azaltıldı, sağ motor faktörü artırıldı
+        self.left_motor_factor = 0.85  # Sol motor faktörü azaltıldı
+        self.right_motor_factor = 1.0  # Sağ motor faktörü normal seviyede
         
         # PID kontrol parametreleri - viraj dönüşleri için optimize edildi
         self.kp = 0.5    # Orantısal katsayı - daha agresif tepki
@@ -632,8 +632,9 @@ class MotorController:
         # PID düzeltmesini hesapla
         pid_correction = self.calculate_pid(center_diff)
         
-        # Temel hızları ayarla - eşit başlangıç hızları
-        base_speed = speed * 0.9
+        # Temel hızları ayarla - sol motor daha düşük hız, sağ motor daha yüksek hız
+        base_left_speed = speed * 0.85  # Sol motor daha düşük
+        base_right_speed = speed * 0.9  # Sağ motor da hafif düşük
         
         # Virajlarda daha agresif dönüş için sapma miktarına göre ek düzeltme faktörü
         extra_correction = 0
@@ -646,19 +647,19 @@ class MotorController:
         
         # PID düzeltmesini uygula
         if abs(center_diff) < self.center_deadzone:
-            # Merkeze çok yakınsa eşit hız
-            left_speed = base_speed
-            right_speed = base_speed
+            # Merkeze çok yakınsa sol motoru daha yavaş, sağ motoru daha hızlı tut
+            left_speed = base_left_speed
+            right_speed = base_right_speed
         else:
             # PID düzeltmesini hızlara uygula
             correction = (pid_correction * self.turn_speed_factor) + extra_correction
             
             if center_diff < 0:  # Sola dönüş gerekiyor
-                left_speed = base_speed * (1 - abs(correction) * 1.5)  # Sol motor daha yavaş
-                right_speed = base_speed * (1 + abs(correction) * 1.2)  # Sağ motor daha hızlı
+                left_speed = base_left_speed * (1 - abs(correction) * 1.5)  # Sol motor daha yavaş
+                right_speed = base_right_speed * (1 + abs(correction) * 1.2)  # Sağ motor daha hızlı
             else:  # Sağa dönüş gerekiyor
-                left_speed = base_speed * (1 + abs(correction) * 1.2)  # Sol motor daha hızlı
-                right_speed = base_speed * (1 - abs(correction) * 1.5)  # Sağ motor daha yavaş
+                left_speed = base_left_speed * (1 + abs(correction) * 1.2)  # Sol motor daha hızlı
+                right_speed = base_right_speed * (1 - abs(correction) * 1.5)  # Sağ motor daha yavaş
         
         # Hızları sınırla
         left_speed = max(min(left_speed, self.max_speed), self.min_motor_speed)

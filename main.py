@@ -127,16 +127,17 @@ class OtonomArac:
             )
             self.camera.configure(preview_config)
             
-            # Kamera özel ayarlarını düzenleme
+            # Kamera özel ayarlarını düzenleme - Görüntü parlaklığı ve kontrastı artırıldı
             try:
                 controls = {
                     "AwbEnable": True,          # Otomatik beyaz dengesi
                     "AeEnable": True,           # Otomatik pozlama
-                    "ExposureTime": 10000,      # Pozlama süresi (mikrosaniye)
-                    "AnalogueGain": 1.0,        # Analog kazanç
-                    "Brightness": 0.0,          # Parlaklık
-                    "Contrast": 1.0,            # Kontrast
-                    "Sharpness": 1.0,           # Keskinlik
+                    "ExposureTime": 15000,      # Pozlama süresi artırıldı (mikrosaniye)
+                    "AnalogueGain": 1.5,        # Analog kazanç artırıldı
+                    "Brightness": 0.1,          # Parlaklık artırıldı
+                    "Contrast": 1.2,            # Kontrast artırıldı
+                    "Sharpness": 1.5,           # Keskinlik artırıldı
+                    "Saturation": 1.2,          # Renk doygunluğu artırıldı
                     "NoiseReductionMode": 1     # Gürültü azaltma
                 }
                 self.camera.set_controls(controls)
@@ -159,9 +160,9 @@ class OtonomArac:
                     logger.warning(f"Test görüntüsü alınamadı, tekrar deneniyor: {e}")
                 time.sleep(0.5)
             
-            # Kameranın dengelenmesi için bekle
+            # Kameranın dengelenmesi için bekle - süre artırıldı
             logger.info("Kamera dengeleniyor...")
-            time.sleep(2)
+            time.sleep(3)  # Daha uzun süre bekleyerek kameranın dengelenmesini sağla
             
             logger.info("Kamera başarıyla başlatıldı.")
             

@@ -3,7 +3,7 @@
 
 """
 Otonom Araç - Kalibrasyon Başlatma Aracı
-Bu program, kalibrasyon_optimize.py kullanarak kalibrasyon ve test işlemlerini başlatır.
+Bu program, sadece kalibrasyon_optimize.py dosyasını kullanarak kalibrasyon ve test işlemlerini başlatır.
 """
 
 import os

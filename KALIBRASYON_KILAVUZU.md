@@ -1,6 +1,6 @@
 # Otonom Araç Kalibrasyon Kılavuzu
 
-Bu kılavuz, otonom araç projesindeki şerit tespit sistemini kalibre etmek için oluşturulan araçları ve adımları içermektedir.
+Bu kılavuz, otonom araç projesindeki şerit tespit sistemini kalibre etmek için kullanılan kalibrasyon aracını ve adımları açıklamaktadır.
 
 ## Kalibrasyon Nedir ve Neden Önemlidir?
 
@@ -11,18 +11,19 @@ Kalibrasyon işlemi, şerit tespit algoritmasının doğru çalışması için g
 3. İşleme hızını optimize eder
 4. Aracın yönlendirme doğruluğunu artırır
 
-## Kalibrasyon Araçları
+## Görsel Kalibrasyon Aracı (`kalibrasyon_optimize.py`)
 
-Projede üç farklı kalibrasyon aracı bulunmaktadır:
-
-### 1. Görsel Kalibrasyon Aracı (`kalibrasyon_optimize.py`)
-
-Bu araç, kameradan alınan görüntü üzerinde tıklama yaparak perspektif dönüşüm noktalarını seçmenizi sağlar. Hafif ve optimize edilmiş versiyondur, donma sorunlarını çözmek için geliştirilmiştir.
+Projede kullanılan kalibrasyon aracı, kameradan alınan görüntü üzerinde tıklama yaparak perspektif dönüşüm noktalarını seçmenizi sağlar. Hafif ve optimize edilmiş yapısıyla, sorunsuz bir kalibrasyon deneyimi sunar.
 
 **Kullanım:**
 ```
-python3 kalibrasyon_optimize.py [--camera 0] [--resolution 320x240] [--output calibration.json]
+python kalibrasyon_optimize.py [--camera 0] [--resolution 640x480] [--output serit_kalibrasyon.json]
 ```
+
+**Parametreler:**
+- `--camera`: Kullanılacak kamera numarası (varsayılan: 0)
+- `--resolution`: Kamera çözünürlüğü (varsayılan: 640x480)
+- `--output`: Kalibrasyon verilerinin kaydedileceği dosya (varsayılan: serit_kalibrasyon.json)
 
 **Adımlar:**
 1. Program kameradan gelen görüntüyü gösterir
@@ -34,71 +35,31 @@ python3 kalibrasyon_optimize.py [--camera 0] [--resolution 320x240] [--output ca
 3. Noktaları seçtikten sonra 'S' tuşuna basarak kaydedebilir veya 'R' tuşuna basarak yeniden başlatabilirsiniz
 4. ESC tuşu ile programdan çıkabilirsiniz
 
-### 2. Komut Satırı Kalibrasyon Aracı (`kalibrasyon_olustur_optimize.py`) 
-
-Bu araç, görsel arayüz kullanmadan komut satırı üzerinden kalibrasyon dosyası oluşturmanızı sağlar. İki şekilde kullanabilirsiniz:
-
-**İnteraktif Mod:**
-```
-python3 kalibrasyon_olustur_optimize.py --interactive [--resolution 320x240] [--output calibration.json]
-```
-Bu mod size adım adım kalibrasyon noktalarını girmeniz için rehberlik eder.
-
-**Hızlı Mod:**
-```
-python3 kalibrasyon_olustur_optimize.py --quick-mode [--resolution 320x240] [--output calibration.json]
-```
-Bu mod varsayılan değerlerle hızlıca kalibrasyon dosyası oluşturur.
-
-**Manuel Nokta Girişi:**
-```
-python3 kalibrasyon_olustur_optimize.py --src-points "112,156" "208,156" "0,240" "320,240" [--dst-points "80,0" "240,0" "80,240" "240,240"] [--output calibration.json]
-```
-Bu kullanımda noktaları doğrudan komut satırından belirtebilirsiniz.
-
-### 3. Orijinal Kalibrasyon Aracı (`kalibrasyon.py`)
-
-Bu, projenin orijinal kalibrasyon aracıdır. Bazı durumlarda donma sorunları yaşanabilir, bu nedenle optimize edilmiş versiyonları kullanmanızı öneririz.
-
 ## Kalibrasyon İş Akışı
 
-### Adım 1: İlk Kalibrasyon Dosyasını Oluşturun
+### Adım 1: Kalibrasyon Başlatma Aracını Çalıştırın
 
-Başlangıçta, varsayılan değerlerle bir kalibrasyon dosyası oluşturun:
-
-```
-python3 kalibrasyon_olustur_optimize.py --quick-mode
-```
-
-### Adım 2: Kalibrasyon Test Edin
-
-Oluşturulan kalibrasyon dosyasını test edin:
+Kalibrasyon başlatma aracını çalıştırarak kalibrasyon işlemini başlatın:
 
 ```
-python3 kamera_test.py --debug
+python kalibrasyon_basla.py
 ```
 
-veya bir video dosyası üzerinde:
+### Adım 2: Şerit Kalibrasyonu Seçeneğini Seçin
 
-```
-python3 video_test.py --video <video_dosyası> --debug
-```
+Ana menüden "1. Şerit Kalibrasyonu (kalibrasyon_optimize.py)" seçeneğini seçin ve istediğiniz çözünürlüğü belirleyin.
 
-### Adım 3: Kalibrasyon İyileştirin
+### Adım 3: Kalibrasyon Noktalarını Belirleyin
 
-Sonuçlar tatmin edici değilse, görsel kalibrasyon aracını kullanarak daha iyi sonuçlar elde etmeyi deneyin:
+Açılan pencerede şerit tespiti için 4 noktayı şu sırayla belirleyin:
+- P0: Sol üst nokta (şeridin sol üst köşesi)
+- P1: Sağ üst nokta (şeridin sağ üst köşesi)
+- P2: Sol alt nokta (genellikle ekranın sol alt köşesi)
+- P3: Sağ alt nokta (genellikle ekranın sağ alt köşesi)
 
-```
-python3 kalibrasyon_optimize.py
-```
+### Adım 4: Kalibrasyon Test Edin
 
-### Adım 4: İnce Ayar Yapın
-
-Gerekirse kalibrasyon parametrelerini interaktif modda ince ayarlayın:
-
-```
-python3 kalibrasyon_olustur_optimize.py --interactive
-```
+Kalibrasyon işlemi tamamlandıktan sonra, ana menüden "2. Kamera Testi" seçeneğini seçerek kalibrasyonu test edin.
 
 ## Kalibrasyon İpuçları
 
@@ -117,13 +78,13 @@ python3 kalibrasyon_olustur_optimize.py --interactive
 
 ## Kalibrasyon Parametreleri
 
-Kalibrasyon dosyasındaki (`calibration.json`) temel parametreler şunlardır:
+Kalibrasyon dosyasındaki (`serit_kalibrasyon.json`) temel parametreler şunlardır:
 
 ```json
 {
   "src_points": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],  // Kaynak perspektif noktaları
   "dst_points": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],  // Hedef perspektif noktaları
-  "resolution": {"width": 320, "height": 240},          // Çözünürlük
+  "resolution": {"width": 640, "height": 480},          // Çözünürlük
   "canny_low_threshold": 50,                           // Canny kenar algılama alt eşiği
   "canny_high_threshold": 150,                         // Canny kenar algılama üst eşiği
   "blur_kernel_size": 5,                               // Bulanıklaştırma çekirdek boyutu
@@ -139,19 +100,17 @@ Kalibrasyon dosyasındaki (`calibration.json`) temel parametreler şunlardır:
 
 ## Sorun Giderme
 
-1. **Kalibrasyon Aracı Donuyor**: `kalibrasyon_optimize.py` veya `kalibrasyon_olustur_optimize.py` araçlarını kullanın
-
-2. **Şeritler Algılanmıyor**:
+1. **Şeritler Algılanmıyor**:
    - Perspektif noktalarını yeniden ayarlayın
    - Renk filtreleri değerlerini ortam ışık koşullarına göre ayarlayın
    - Canny eşik değerlerini değiştirin
 
-3. **Şerit Tespiti Kararsız**:
+2. **Şerit Tespiti Kararsız**:
    - `max_line_gap` değerini artırın
    - `min_line_length` değerini azaltın
    - Daha düşük çözünürlük kullanın (320x240 önerilir)
 
-4. **İşlem Hızı Yavaş**:
+3. **İşlem Hızı Yavaş**:
    - Daha düşük çözünürlük kullanın
    - `blur_kernel_size` değerini azaltın
    - Debug modunu kapatın
